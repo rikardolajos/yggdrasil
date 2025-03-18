@@ -3,13 +3,37 @@
 
 #include <GLFW/glfw3.h>
 
-void createDevice()
+GLFWwindow* pWindow;
+VkSurfaceKHR surface;
+
+void createWindow()
+{
+    if (!glfwInit()) {
+        YG_ERROR("Failed to initialize GLFW");
+    }
+
+    pWindow = glfwCreateWindow(640, 480, "Yggdrasil Example", NULL, NULL);
+    if (!pWindow) {
+        glfwTerminate();
+        YG_ERROR("Failed to create GLFW window");
+    }
+
+    glfwMakeContextCurrent(window);
+}
+
+void createInstance()
 {
     uint32_t instanceExtensionCount;
     glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
-    const char** instanceExtensions =
+    const char** ppInstanceExtensions =
         glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
 
+    ygCreateInstance(VK_API_VERSION_1_3, ppInstanceExtensions,
+                     instanceExtensionCount);
+}
+
+void createDevice()
+{
     VkPhysicalDeviceVulkan12Features vk12Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
         .descriptorIndexing = VK_TRUE,
@@ -36,14 +60,44 @@ void createDevice()
 
     const char** deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
-    ygCreateDevice(VK_API_VERSION_1_3, 0, instanceExtensions,
-                   instanceExtensionCount, deviceExtensions,
-                   YG_ARRAY_LEN(deviceExtensions), &features);
+    ygCreateDevice(0, deviceExtensions, YG_ARRAY_LEN(deviceExtensions),
+                   &features, surface);
+}
+
+void cleanUp()
+{
+    ygDestroyDevice();
+    ygDestroyInstance();
+
+    glfwTerminate();
 }
 
 int main()
 {
+    createWindow();
+
+    createInstance();
+
+    VK_CHECK(
+        glfwCreateWindowSurface(ygDevice.instance, pWindow, NULL, &surface));
+
     createDevice();
 
-    ygDestroyDevice();
+    while (!glfwWindowShouldClose(pWindow)) {
+        // if (swapchain.recreated) {
+        //     //
+        // }
+
+        // VkCommandBuffer cmd = ygAcquireNextImage();
+
+        // Push descriptor
+
+        // Draw
+
+        // ygPresent(cmd, image);
+
+        glfwPollEvents();
+    }
+
+    cleanUp();
 }
