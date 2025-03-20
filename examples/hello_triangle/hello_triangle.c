@@ -24,13 +24,13 @@ void createWindow()
         YG_ERROR("Failed to initialize GLFW");
     }
 
-    pWindow = glfwCreateWindow(640, 480, "Yggdrasil Example", NULL, NULL);
+    pWindow = glfwCreateWindow(1280, 720, "Hello Triangle", NULL, NULL);
     if (!pWindow) {
         glfwTerminate();
         YG_ERROR("Failed to create GLFW window");
     }
 
-    glfwMakeContextCurrent(window);
+    glfwMakeContextCurrent(pWindow);
 }
 
 void createInstance()
@@ -99,7 +99,7 @@ int main()
     ygCreateSwapchain(2, framebufferSizeCallback);
 
     YgImage image;
-    ygCreateImage(&image);
+    //ygCreateImage(&image);
 
     while (!glfwWindowShouldClose(pWindow)) {
         if (ygSwapchain.recreated) {
@@ -112,7 +112,7 @@ int main()
 
         // Draw
 
-        ygPresent(cmd, image);
+        ygPresent(cmd, &image);
 
         glfwPollEvents();
     }

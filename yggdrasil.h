@@ -26,9 +26,11 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <memory.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define YG_ARRAY_LEN(x) (uint32_t)(sizeof(x) / sizeof *(x))
 
@@ -43,9 +45,6 @@
 #ifndef YG_FREE
 #define YG_FREE(p) free(p)
 #endif
-
-extern YgDevice ygDevice;
-extern YgSwapchain ygSwapchain;
 
 struct VulkanErrors {
     VkResult result;
@@ -118,12 +117,13 @@ struct VulkanErrors {
             __LINE__, ##__VA_ARGS__);                                          \
     abort();
 
-#define VK_CHECK(res)                                                          \
+#define VK_CHECK(x)                                                            \
     do {                                                                       \
-        if ((res)) {                                                           \
+        VkResult res = x;                                                      \
+        if (res) {                                                             \
             for (size_t i = 0; i < YG_ARRAY_LEN(ygVulkanErrors); i++) {        \
                 if ((res) == ygVulkanErrors[i].result) {                       \
-                    YG_ERROR(ygVulkanErrors[i].string);                        \
+                    YG_ERROR("%s", ygVulkanErrors[i].string);                  \
                 }                                                              \
             }                                                                  \
         }                                                                      \
@@ -166,14 +166,14 @@ typedef struct YgSwapchain {
     } supportDetails;
 
     VkImage* images;
-    VkImageView imageViews;
+    VkImageView* imageViews;
     uint32_t imageCount;
     uint32_t imageIndex;
 
     VkCommandBuffer* commandBuffers;
     VkSemaphore* imageAvailableSemaphores;
     VkSemaphore* renderFinishedSemaphores;
-    VkFence inFlightFences;
+    VkFence* inFlightFences;
     uint32_t framesInFlight;
     uint32_t inFlightIndex;
 
@@ -191,7 +191,18 @@ typedef struct YgBuffer {
 
 typedef struct YgImage {
     VkImage image;
+    VkImageView imageView;
+    VkDeviceMemory memory;
+    bool mOwnMemory;
+    uint32_t width;
+    uint32_t height;
+    uint32_t mipLevels;
+    VkFormat format;
+    VkImageTiling tiling;
 } YgImage;
+
+extern YgDevice ygDevice;
+extern YgSwapchain ygSwapchain;
 
 void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
                       uint32_t instanceExtensionCount);
@@ -215,8 +226,8 @@ VkCommandBuffer ygAcquireNextImage();
 
 void ygPresent(VkCommandBuffer cmd, YgImage* pImage);
 
-YgBuffer ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                        VkMemoryPropertyFlags properties, YgBuffer* pBuffer);
+void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
+                    VkMemoryPropertyFlags properties, YgBuffer* pBuffer);
 
 void ygDestroyBuffer(YgBuffer* pBuffer);
 
@@ -312,7 +323,7 @@ inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates,
     }
 
     for (uint32_t i = 0; i < candidateCount; i++) {
-        VkFormat c = *pCandidates[i];
+        VkFormat c = pCandidates[i];
 
         VkFormatProperties properties;
         vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice, c,
@@ -381,10 +392,10 @@ inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
     vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
-#define YGGDRASIL_IMPLEMENTATION
 #ifdef YGGDRASIL_IMPLEMENTATION
 
 static YgDevice ygDevice;
+static YgSwapchain ygSwapchain;
 
 #define YG_RESET(x) memset((x), 0, sizeof(*(x)))
 
@@ -440,9 +451,9 @@ destroyDebugUtilsMessengerEXT(VkInstance instance,
 }
 
 static void
-populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& ci)
+populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT* ci)
 {
-    ci = (VkDebugUtilsMessengerCreateInfoEXT){
+    *ci = (VkDebugUtilsMessengerCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                            VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
@@ -456,7 +467,7 @@ populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT& ci)
 static void createDebugMessenger()
 {
     VkDebugUtilsMessengerCreateInfoEXT ci;
-    populateDebugMessengerCreateInfo(ci);
+    populateDebugMessengerCreateInfo(&ci);
 
     VK_CHECK(createDebugUtilsMessengerEXT(ygDevice.instance, &ci, NULL,
                                           &ygDevice.debugMessenger));
@@ -477,7 +488,7 @@ void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &ai,
         .enabledExtensionCount = instanceExtensionCount,
-        .ppExtensions = ppInstanceExtensions,
+        .ppEnabledExtensionNames = ppInstanceExtensions,
     };
 
 #ifndef NDEBUG
@@ -530,7 +541,8 @@ static bool checkDeviceExtensionSupport(const char** ppDeviceExtensions,
         }
 
         if (!found) {
-            YG_ERROR("The requested extension %s is not available", e);
+            YG_ERROR("The requested extension %s is not available",
+                     ppDeviceExtensions[i]);
             result = false;
         }
     }
@@ -547,13 +559,13 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
     vkGetPhysicalDeviceQueueFamilyProperties(ygDevice.physicalDevice, &n, NULL);
     VkQueueFamilyProperties* pProps = YG_MALLOC(n * sizeof *pProps);
     vkGetPhysicalDeviceQueueFamilyProperties(ygDevice.physicalDevice, &n,
-                                             queueFamilyProperties.data());
+                                             pProps);
 
     if (!n) {
         YG_ERROR("No Vulkan queue family available");
     }
 
-    YG_DEBUG("Available queue families for selected device: {}", n);
+    YG_DEBUG("Available queue families for selected device: %d", n);
 
     uint32_t index = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -597,10 +609,11 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
     // Iterate all physical devices
     uint32_t n;
-    VK_CHECK(vkEnumeratePhysicalDevices(mInstance, &n, NULL));
+    VK_CHECK(vkEnumeratePhysicalDevices(ygDevice.instance, &n, NULL));
     VkPhysicalDevice* pPhysicalDevices =
         YG_MALLOC(n * sizeof *pPhysicalDevices);
-    VK_CHECK(vkEnumeratePhysicalDevices(mInstance, &n, physicalDevices.data()));
+    VK_CHECK(
+        vkEnumeratePhysicalDevices(ygDevice.instance, &n, pPhysicalDevices));
 
     YG_INFO("Available devices (%d):", n);
     for (uint32_t i = 0; i < n; i++) {
@@ -619,13 +632,13 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
             .pNext = &driver,
         };
 
-        vkGetPhysicalDeviceProperties2(physicalDevices[i], &prop);
+        vkGetPhysicalDeviceProperties2(pPhysicalDevices[i], &prop);
 
         if (i == physicalDeviceIndex) {
-            ygDevice.physicalDevce = physicalDevices[i];
-            vkGetPhysicalDeviceProperties(ygDevice.physicalDevce,
+            ygDevice.physicalDevice = pPhysicalDevices[i];
+            vkGetPhysicalDeviceProperties(ygDevice.physicalDevice,
                                           &ygDevice.properties.physicalDevice);
-            vkGetPhysicalDeviceMemoryProperties(ygDevice.physicalDevce,
+            vkGetPhysicalDeviceMemoryProperties(ygDevice.physicalDevice,
                                                 &ygDevice.properties.memory);
             ygDevice.properties.rayTracingPipeline = rtp;
         }
@@ -641,8 +654,7 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
     YG_FREE(pPhysicalDevices);
 
-    uin32_t queueFamilyIndex = ygGetQueueFamilyIndex(
-        ygDevice.physicalDevice, surface,
+    uint32_t queueFamilyIndex = getQueueFamilyIndex(surface,
         VK_QUEUE_GRAPHICS_BIT && VK_QUEUE_COMPUTE_BIT && VK_QUEUE_TRANSFER_BIT);
 
     float queuePriority = 1.0f;
@@ -706,13 +718,13 @@ static void querySupport()
 
     VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
         ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.presentModeCount, NULL));
+        &ygSwapchain.supportDetails.presentCount, NULL));
     ygSwapchain.supportDetails.presentModes =
-        YG_MALLOC(&ygSwapchain.supportDetails.presentModeCount *
+        YG_MALLOC(ygSwapchain.supportDetails.presentCount *
                   sizeof *&ygSwapchain.supportDetails.presentModes);
     VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
         ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.presentModeCount,
+        &ygSwapchain.supportDetails.presentCount,
         ygSwapchain.supportDetails.presentModes));
 }
 
@@ -758,8 +770,8 @@ choosePresentMode(const VkPresentModeKHR* availablePresentModes,
 static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities,
                                uint32_t width, uint32_t height)
 {
-    if (capabilities.currentExtent.width != UINT32_MAX) {
-        return capabilities.currentExtent;
+    if (capabilities->currentExtent.width != UINT32_MAX) {
+        return capabilities->currentExtent;
     } else {
         VkExtent2D actualExtent = {
             .width = (uint32_t)width,
@@ -767,11 +779,11 @@ static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities,
         };
 
         actualExtent.width =
-            YG_CLAMP(actualExtent.width, capabilities.minImageExtent.width,
-                     capabilities.maxImageExtent.width);
+            YG_CLAMP(actualExtent.width, capabilities->minImageExtent.width,
+                     capabilities->maxImageExtent.width);
         actualExtent.height =
-            YG_CLAMP(actualExtent.height, capabilities.minImageExtent.height,
-                     capabilities.maxImageExtent.height);
+            YG_CLAMP(actualExtent.height, capabilities->minImageExtent.height,
+                     capabilities->maxImageExtent.height);
 
         return actualExtent;
     }
@@ -784,11 +796,13 @@ static void createSwapchain()
     ygSwapchain.framebufferSizeCallback(&width, &height);
 
     VkSurfaceFormatKHR surfaceFormat =
-        chooseSurfaceFormat(ygSwapchain.supportDetails.formats);
+        chooseSurfaceFormat(ygSwapchain.supportDetails.formats,
+                            ygSwapchain.supportDetails.formatCount);
     VkPresentModeKHR presentMode = choosePresentMode(
-        ygSwapchain.supportDetails.presentModes, ygDevice.vsync);
+        ygSwapchain.supportDetails.presentModes,
+        ygSwapchain.supportDetails.presentCount, ygDevice.vsync);
     VkExtent2D extent =
-        chooseExtent(ygSwapchain.supportDetails.capabilities, width, height);
+        chooseExtent(&ygSwapchain.supportDetails.capabilities, width, height);
 
     // Using at least minImageCount number of images is required but using one
     // extra can avoid unnecessary waits on the driver
@@ -855,8 +869,8 @@ static void createSwapchain()
                                  .layerCount = 1},
         };
 
-        VK_CHECK(
-            vkCreateImageView(ygDevice.device, &ci, NULL, &mImageViews[i]));
+        VK_CHECK(vkCreateImageView(ygDevice.device, &ci, NULL,
+                                   &ygSwapchain.imageViews[i]));
     }
 }
 
@@ -866,7 +880,7 @@ static void destroySwapchain()
 
     // Swapchain images are destroyed in vkDestroySwapchainKHR()
     for (uint32_t i = 0; i < ygSwapchain.imageCount; i++) {
-        vkDestroyImageView(ygDevice.device, ygSwapchain.imageView[i], NULL);
+        vkDestroyImageView(ygDevice.device, ygSwapchain.imageViews[i], NULL);
     }
 
     vkDestroySwapchainKHR(ygDevice.device, ygSwapchain.swapchain, NULL);
@@ -977,14 +991,8 @@ void ygDestroySwapchain()
 
 void ygRecreateSwapchain()
 {
+    uint32_t width, height;
     ygSwapchain.framebufferSizeCallback(&width, &height);
-    // Handle minimization
-    int width = 0;
-    int height = 0;
-    do {
-        glfwGetFramebufferSize(mpDevice->getWindow(), &width, &height);
-        glfwWaitEvents();
-    } while (width == 0 || height == 0);
 
     YG_DEBUG("Recreating swapchain %" PRIu32 "x%" PRIu32, width, height);
 
@@ -1030,10 +1038,10 @@ VkCommandBuffer ygAcquireNextImage()
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
 
-    VK_CHECK(
-        vkBeginCommandBuffer(mCommandBuffers[ygSwapchain.inFlightIndex], &bi));
+    VK_CHECK(vkBeginCommandBuffer(
+        ygSwapchain.commandBuffers[ygSwapchain.inFlightIndex], &bi));
 
-    return mCommandBuffers[ygSwapchain.inFlightIndex];
+    return ygSwapchain.commandBuffers[ygSwapchain.inFlightIndex];
 }
 
 void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
@@ -1057,8 +1065,8 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
         .baseArrayLayer = 0,
         .layerCount = 1,
     };
-    int32_t srcWidth = pImage.width;
-    int32_t srcHeight = pImage.height;
+    int32_t srcWidth = pImage->width;
+    int32_t srcHeight = pImage->height;
     int32_t dstWidth = (int32_t)(ygSwapchain.extent.width);
     int32_t dstHeight = (int32_t)(ygSwapchain.extent.height);
     VkImageBlit region = {
@@ -1068,10 +1076,10 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
         .dstOffsets = {{0, 0, 0}, {dstWidth, dstHeight, 1}},
     };
 
-    vkCmdBlitImage(
-        cmd, pImage->getImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        ygSwapchain.images[ygSwapchain.imageIndex],
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_NEAREST);
+    vkCmdBlitImage(cmd, pImage->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   ygSwapchain.images[ygSwapchain.imageIndex],
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
+                   VK_FILTER_NEAREST);
 
     // Transition swapchain image for presenting
     ygImageBarrier(
@@ -1089,7 +1097,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores =
-            &mImageAvailableSemaphores[ygSwapchain.inFlightIndex],
+            &ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex],
         .pWaitDstStageMask = &waitStage,
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
@@ -1131,7 +1139,7 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
         YG_ERROR("Device not initialized");
     }
 
-    *pBuffer = {
+    *pBuffer = (YgBuffer){
         .usage = usage,
         .properties = properties,
     };
@@ -1158,8 +1166,7 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     VkMemoryAllocateInfo allocInfo = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = memReqs.size,
-        .memoryTypeIndex = ygFindMemoryType(ygDevice.device,
-                                            memReqs.memoryTypeBits, properties),
+        .memoryTypeIndex = ygFindMemoryType(memReqs.memoryTypeBits, properties),
     };
 
     if (pBuffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
@@ -1199,10 +1206,11 @@ void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
     // Check if we need a staging buffer or not
     if (!(pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
         // Set up staging buffer
-        YgBuffer staging =
-            ygCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        YgBuffer staging;
+        ygCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       &staging);
 
         // Copy to staging buffer
         ygBufferCopyFromHost(&staging, pData, size, 0);
@@ -1214,7 +1222,7 @@ void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
             .dstOffset = offset,
             .size = size,
         };
-        vkCmdCopyBuffer(cmd, staging.getBuffer(), mBuffer, 1, &region);
+        vkCmdCopyBuffer(cmd, staging.buffer, pBuffer->buffer, 1, &region);
 
         ygCmdEnd(cmd);
 
