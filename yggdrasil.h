@@ -21,6 +21,27 @@
 
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Platform
+#define YGGDRASIL_PLATFORM_WINDOWS 1
+#define YGGDRASIL_PLATFORM_LINUX 2
+
+#ifndef YGGDRASIL_PLATFORM
+#if defined(_WIN64)
+#define YGGDRASIL_PLATFORM YGGDRASIL_PLATFORM_WINDOWS
+#elif defined(__linux__)
+#define YGGDRASIL_PLATFORM YGGDRASIL_PLATFORM_LINUX
+#else
+#error "Unsupported target platform"
+#endif
+#endif
+
+#define YGGDRASIL_WINDOWS (YGGDRASIL_PLATFORM == YGGDRASIL_PLATFORM_WINDOWS)
+#define YGGDRASIL_LINUX (YGGDRASIL_PLATFORM == YGGDRASIL_PLATFORM_LINUX)
+
 #include <vulkan/vulkan.h>
 
 #include <assert.h>
@@ -31,6 +52,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if MANDRILL_LINUX
+#include <csignal>
+#endif
 
 #define YG_ARRAY_LEN(x) (uint32_t)(sizeof(x) / sizeof *(x))
 
@@ -112,10 +137,23 @@ struct VulkanErrors {
     fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__,    \
             __LINE__, ##__VA_ARGS__);
 
+#ifdef NDEBUG
+#define YG_ERROR(fmt, ...)                                                     \
+    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
+            __LINE__, ##__VA_ARGS__);
+#else
+#if YGGDRASIL_WINDOWS
 #define YG_ERROR(fmt, ...)                                                     \
     fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
             __LINE__, ##__VA_ARGS__);                                          \
-    abort();
+    __debugbreak();
+#elif YGGDRASIL_LINUX
+#define YG_ERROR(fmt, ...)                                                     \
+    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
+            __LINE__, ##__VA_ARGS__);                                          \
+    std::raise(SIGTRAP);
+#endif
+#endif
 
 #define VK_CHECK(x)                                                            \
     do {                                                                       \
@@ -158,7 +196,7 @@ typedef struct YgSwapchain {
     void (*framebufferSizeCallback)(uint32_t*, uint32_t*);
 
     struct SupportDetails {
-        VkSurfaceCapabilities2EXT capabilities;
+        VkSurfaceCapabilitiesKHR capabilities;
         VkSurfaceFormatKHR* formats;
         uint32_t formatCount;
         VkPresentModeKHR* presentModes;
@@ -193,13 +231,16 @@ typedef struct YgImage {
     VkImage image;
     VkImageView imageView;
     VkDeviceMemory memory;
-    bool mOwnMemory;
     uint32_t width;
     uint32_t height;
     uint32_t mipLevels;
     VkFormat format;
     VkImageTiling tiling;
 } YgImage;
+
+typedef struct YgSampler {
+    VkSampler sampler;
+} YgSampler;
 
 extern YgDevice ygDevice;
 extern YgSwapchain ygSwapchain;
@@ -216,11 +257,12 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
 void ygDestroyDevice();
 
-void ygCreateSwapchain(uint32_t framesInFlight);
+void ygCreateSwapchain(uint32_t framesInFlight,
+                       void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
 
 void ygDestroySwapchain();
 
-void ygRecreateSwapchain(uint32_t width, uint32_t height);
+void ygRecreateSwapchain();
 
 VkCommandBuffer ygAcquireNextImage();
 
@@ -233,6 +275,23 @@ void ygDestroyBuffer(YgBuffer* pBuffer);
 
 void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
                           VkDeviceSize size, VkDeviceSize offset);
+
+void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
+                   VkSampleCountFlagBits samples, VkFormat format,
+                   VkImageTiling tiling, VkImageUsageFlags usage,
+                   VkMemoryPropertyFlags properties, YgImage* pImage);
+
+void ygDestroyImage(YgImage* pImage);
+
+void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags);
+
+void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
+                     VkSamplerMipmapMode mipmapMode,
+                     VkSamplerAddressMode addressModeU,
+                     VkSamplerAddressMode addressModeV,
+                     VkSamplerAddressMode addressModeW, YgSampler* pSampler);
+
+void ygDestroySampler(YgSampler* pSampler);
 
 inline void* ygCheckedMalloc(size_t sz)
 {
@@ -404,6 +463,19 @@ static YgSwapchain ygSwapchain;
 
 #define YG_CLAMP(x, low, high) (YG_MIN(YG_MAX((x), (low)), (high)))
 
+// Macro for loading a device function pointers as Xvk...()
+#define VK_LOAD(func_name)                                                     \
+    PFN_##func_name X##func_name =                                             \
+        (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name)
+
+// Macro for calling a function via its vkGetDeviceProcAddr name
+#define VK_CALL(func_name, ...)                                                \
+    do {                                                                       \
+        PFN_##func_name pfn_##func_name =                                      \
+            (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name); \
+        pfn_##func_name(__VA_ARGS__);                                          \
+    } while (0);
+
 #ifndef NDEBUG
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -430,7 +502,8 @@ static VkResult createDebugUtilsMessengerEXT(
     VkDebugUtilsMessengerEXT* pDebugMessenger)
 {
     PFN_vkCreateDebugUtilsMessengerEXT func =
-        vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != NULL) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
     } else {
@@ -444,7 +517,8 @@ destroyDebugUtilsMessengerEXT(VkInstance instance,
                               const VkAllocationCallbacks* pAllocator)
 {
     PFN_vkDestroyDebugUtilsMessengerEXT func =
-        vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
+            instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func) {
         func(instance, debugMessenger, pAllocator);
     }
@@ -495,6 +569,16 @@ void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
     const char* layers[] = {"VK_LAYER_KHRONOS_validation"};
     ci.enabledLayerCount = YG_ARRAY_LEN(layers);
     ci.ppEnabledLayerNames = layers;
+
+    const char** ppExpandedExtensions =
+        YG_MALLOC((instanceExtensionCount + 1) * sizeof *ppExpandedExtensions);
+    memcpy(ppExpandedExtensions, ppInstanceExtensions,
+           instanceExtensionCount * sizeof *ppExpandedExtensions);
+    ppExpandedExtensions[instanceExtensionCount] =
+        VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+
+    ci.enabledExtensionCount = instanceExtensionCount + 1;
+    ci.ppEnabledExtensionNames = ppExpandedExtensions;
 #endif
 
     VK_CHECK(vkCreateInstance(&ci, NULL, &ygDevice.instance));
@@ -506,6 +590,7 @@ void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
 
 #ifndef NDEBUG
     createDebugMessenger();
+    YG_FREE(ppExpandedExtensions);
 #endif
 }
 
@@ -654,7 +739,8 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
     YG_FREE(pPhysicalDevices);
 
-    uint32_t queueFamilyIndex = getQueueFamilyIndex(surface,
+    uint32_t queueFamilyIndex = getQueueFamilyIndex(
+        surface,
         VK_QUEUE_GRAPHICS_BIT && VK_QUEUE_COMPUTE_BIT && VK_QUEUE_TRANSFER_BIT);
 
     float queuePriority = 1.0f;
@@ -676,6 +762,16 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
     VK_CHECK(
         vkCreateDevice(ygDevice.physicalDevice, &ci, NULL, &ygDevice.device));
+
+    VkCommandPoolCreateInfo commandPoolCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queueFamilyIndex,
+    };
+
+    VK_CHECK(vkCreateCommandPool(ygDevice.device, &commandPoolCreateInfo, NULL,
+                                 &ygDevice.commandPool));
+    vkGetDeviceQueue(ygDevice.device, queueFamilyIndex, 0, &ygDevice.queue);
 }
 
 void ygDestroyDevice()
@@ -1107,7 +1203,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     };
 
     VK_CHECK(
-        vkQueueSubmit(ygDevice.device, 1, &si,
+        vkQueueSubmit(ygDevice.queue, 1, &si,
                       ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
 
     VkPresentInfoKHR pi = {
@@ -1120,7 +1216,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
         .pImageIndices = &ygSwapchain.imageIndex,
     };
 
-    VkResult result = vkQueuePresentKHR(ygDevice.device, &pi);
+    VkResult result = vkQueuePresentKHR(ygDevice.queue, &pi);
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         ygRecreateSwapchain();
@@ -1234,4 +1330,123 @@ void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
     }
 }
 
+void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
+                   VkSampleCountFlagBits samples, VkFormat format,
+                   VkImageTiling tiling, VkImageUsageFlags usage,
+                   VkMemoryPropertyFlags properties, YgImage* pImage)
+{
+    *pImage = (YgImage){
+        .width = width,
+        .height = height,
+        .mipLevels = mipLevels,
+        .format = format,
+        .tiling = tiling,
+    };
+
+    VkImageCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = VK_IMAGE_TYPE_2D,
+        .format = format,
+        .extent = {.width = width, .height = height, .depth = 1},
+        .mipLevels = mipLevels,
+        .arrayLayers = 1,
+        .samples = samples,
+        .tiling = tiling,
+        .usage = usage,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+    };
+
+    VK_CHECK(vkCreateImage(ygDevice.device, &ci, NULL, &pImage->image));
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(ygDevice.device, pImage->image, &memReqs);
+
+    VkMemoryAllocateInfo allocInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = memReqs.size,
+        .memoryTypeIndex = ygFindMemoryType(memReqs.memoryTypeBits, properties),
+    };
+
+    VK_CHECK(
+        vkAllocateMemory(ygDevice.device, &allocInfo, NULL, &pImage->memory));
+
+    VK_CHECK(
+        vkBindImageMemory(ygDevice.device, pImage->image, pImage->memory, 0));
+}
+
+void ygDestroyImage(YgImage* pImage)
+{
+    vkDeviceWaitIdle(ygDevice.device);
+
+    vkFreeMemory(ygDevice.device, pImage->memory, NULL);
+    vkDestroyImageView(ygDevice.device, pImage->imageView, NULL);
+    vkDestroyImage(ygDevice.device, pImage->image, NULL);
+
+    YG_RESET(pImage);
+}
+
+void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags)
+{
+    VkImageViewCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = pImage->image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = pImage->format,
+        .components = {.r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                       .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                       .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+                       .a = VK_COMPONENT_SWIZZLE_IDENTITY},
+        .subresourceRange = {.aspectMask = aspectFlags,
+                             .baseMipLevel = 0,
+                             .levelCount = pImage->mipLevels,
+                             .baseArrayLayer = 0,
+                             .layerCount = 1},
+    };
+
+    VK_CHECK(vkCreateImageView(ygDevice.device, &ci, NULL, &pImage->imageView));
+}
+
+void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
+                     VkSamplerMipmapMode mipmapMode,
+                     VkSamplerAddressMode addressModeU,
+                     VkSamplerAddressMode addressModeV,
+                     VkSamplerAddressMode addressModeW, YgSampler* pSampler)
+{
+    VkSamplerCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = magFilter,
+        .minFilter = minFilter,
+        .mipmapMode = mipmapMode,
+        .addressModeU = addressModeU,
+        .addressModeV = addressModeV,
+        .addressModeW = addressModeW,
+        .mipLodBias = 0.0f,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy =
+            ygDevice.properties.physicalDevice.limits.maxSamplerAnisotropy,
+        .compareEnable = VK_FALSE,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .minLod = 0.0f,
+        .maxLod = 1000.0f,
+        .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+
+    VK_CHECK(vkCreateSampler(ygDevice.device, &ci, NULL, &pSampler->sampler));
+}
+
+void ygDestroySampler(YgSampler* pSampler)
+{
+    vkDeviceWaitIdle(ygDevice.device);
+
+    vkDestroySampler(ygDevice.device, pSampler->sampler, NULL);
+
+    YG_RESET(pSampler);
+}
+
+#endif
+
+#ifdef __cplusplus
+}
 #endif

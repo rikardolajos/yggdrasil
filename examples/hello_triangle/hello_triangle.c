@@ -6,6 +6,9 @@
 GLFWwindow* pWindow;
 VkSurfaceKHR surface;
 
+//
+uint8_t shaderModule[] = {0xff};
+
 void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 {
     *pWidth = 0;
@@ -23,6 +26,9 @@ void createWindow()
     if (!glfwInit()) {
         YG_ERROR("Failed to initialize GLFW");
     }
+
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
     pWindow = glfwCreateWindow(1280, 720, "Hello Triangle", NULL, NULL);
     if (!pWindow) {
@@ -46,7 +52,7 @@ void createInstance()
 
 void createDevice()
 {
-    const char** deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     VkPhysicalDeviceVulkan12Features vk12Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
