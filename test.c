@@ -6,6 +6,18 @@
 GLFWwindow* pWindow;
 VkSurfaceKHR surface;
 
+void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
+{
+    *pWidth = 0;
+    *pHeight = 0;
+
+    // Handle minimization
+    do {
+        glfwGetFramebufferSize(pWindow, pWidth, pHeight);
+        glfwWaitEvents();
+    } while (pWidth == 0 || pHeight == 0);
+}
+
 void createWindow()
 {
     if (!glfwInit()) {
@@ -34,6 +46,8 @@ void createInstance()
 
 void createDevice()
 {
+    const char** deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
     VkPhysicalDeviceVulkan12Features vk12Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
         .descriptorIndexing = VK_TRUE,
@@ -58,14 +72,13 @@ void createDevice()
         .pNext = &vk14Features,
     };
 
-    const char** deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-
     ygCreateDevice(0, deviceExtensions, YG_ARRAY_LEN(deviceExtensions),
                    &features, surface);
 }
 
 void cleanUp()
 {
+    ygDestroySwapchain();
     ygDestroyDevice();
     ygDestroyInstance();
 
@@ -83,18 +96,23 @@ int main()
 
     createDevice();
 
-    while (!glfwWindowShouldClose(pWindow)) {
-        // if (swapchain.recreated) {
-        //     //
-        // }
+    ygCreateSwapchain(2, framebufferSizeCallback);
 
-        // VkCommandBuffer cmd = ygAcquireNextImage();
+    YgImage image;
+    ygCreateImage(&image);
+
+    while (!glfwWindowShouldClose(pWindow)) {
+        if (ygSwapchain.recreated) {
+            //
+        }
+
+        VkCommandBuffer cmd = ygAcquireNextImage();
 
         // Push descriptor
 
         // Draw
 
-        // ygPresent(cmd, image);
+        ygPresent(cmd, image);
 
         glfwPollEvents();
     }
