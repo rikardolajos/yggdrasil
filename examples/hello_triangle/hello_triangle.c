@@ -1,7 +1,12 @@
+#define YGGDRASIL_STBI
 #define YGGDRASIL_IMPLEMENTATION
 #include "yggdrasil.h"
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include <GLFW/glfw3.h>
+
 
 GLFWwindow* pWindow;
 VkSurfaceKHR surface;
@@ -103,6 +108,8 @@ int main()
     createDevice();
 
     ygCreateSwapchain(2, framebufferSizeCallback);
+
+
 
     YgImage image;
     //ygCreateImage(&image);

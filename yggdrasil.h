@@ -44,8 +44,13 @@ extern "C" {
 
 #include <vulkan/vulkan.h>
 
+#ifdef YGGDRASIL_STBI
+#include "stb_image.h"
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
+#include <math.h>
 #include <memory.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -53,7 +58,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 
-#if MANDRILL_LINUX
+#if YGGDRASIL_LINUX
 #include <csignal>
 #endif
 
@@ -242,6 +247,19 @@ typedef struct YgSampler {
     VkSampler sampler;
 } YgSampler;
 
+enum YgTextureType {
+    YG_TEXTURE_1D,
+    YG_TEXTURE_2D,
+    YG_TEXTURE_3D,
+    YG_TEXTURE_CUBE_MAP,
+    YG_TEXTURE_TYPE_COUNT,
+};
+
+typedef struct YgTexture {
+    YgImage image;
+    VkDescriptorImageInfo imageInfo;
+} YgTexture;
+
 extern YgDevice ygDevice;
 extern YgSwapchain ygSwapchain;
 
@@ -273,7 +291,7 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
 
 void ygDestroyBuffer(YgBuffer* pBuffer);
 
-void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
+void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
                           VkDeviceSize size, VkDeviceSize offset);
 
 void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
@@ -292,6 +310,24 @@ void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
                      VkSamplerAddressMode addressModeW, YgSampler* pSampler);
 
 void ygDestroySampler(YgSampler* pSampler);
+
+void ygCreateTexture(enum YgTextureType type, VkFormat format,
+                     const void* pData, uint32_t width, uint32_t height,
+                     uint32_t channels, bool generateMipmaps,
+                     YgTexture* pTexture);
+
+#ifdef YGGDRASIL_STBI
+void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
+                             const char* pPath, bool generateMipmaps,
+                             YgTexture* pTexture);
+#endif
+
+void ygDestroyTexture(YgTexture* pTexture);
+
+VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
+                                            uint32_t binding);
+
+void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
 
 inline void* ygCheckedMalloc(size_t sz)
 {
@@ -1165,17 +1201,26 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     int32_t srcHeight = pImage->height;
     int32_t dstWidth = (int32_t)(ygSwapchain.extent.width);
     int32_t dstHeight = (int32_t)(ygSwapchain.extent.height);
-    VkImageBlit region = {
+    VkImageBlit2 region = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
         .srcSubresource = subresourceLayers,
         .srcOffsets = {{0, 0, 0}, {srcWidth, srcHeight, 1}},
         .dstSubresource = subresourceLayers,
         .dstOffsets = {{0, 0, 0}, {dstWidth, dstHeight, 1}},
     };
 
-    vkCmdBlitImage(cmd, pImage->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   ygSwapchain.images[ygSwapchain.imageIndex],
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region,
-                   VK_FILTER_NEAREST);
+    VkBlitImageInfo2 blitImageInfo = {
+        .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+        .srcImage = pImage->image,
+        .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .dstImage = ygSwapchain.images[ygSwapchain.imageIndex],
+        .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .regionCount = 1,
+        .pRegions = &region,
+        .filter = VK_FILTER_NEAREST,
+    };
+
+    vkCmdBlitImage2(cmd, &blitImageInfo);
 
     // Transition swapchain image for presenting
     ygImageBarrier(
@@ -1296,7 +1341,7 @@ void ygDestroyBuffer(YgBuffer* pBuffer)
     YG_RESET(pBuffer);
 }
 
-void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
+void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
                           VkDeviceSize size, VkDeviceSize offset)
 {
     // Check if we need a staging buffer or not
@@ -1309,7 +1354,7 @@ void ygBufferCopyFromHost(const YgBuffer* pBuffer, const void* pData,
                        &staging);
 
         // Copy to staging buffer
-        ygBufferCopyFromHost(&staging, pData, size, 0);
+        ygCopyBufferFromHost(&staging, pData, size, 0);
 
         // Transfer from staging buffer to this buffer
         VkCommandBuffer cmd = ygCmdBegin();
@@ -1443,6 +1488,234 @@ void ygDestroySampler(YgSampler* pSampler)
     vkDestroySampler(ygDevice.device, pSampler->sampler, NULL);
 
     YG_RESET(pSampler);
+}
+
+static void generateMipmaps(YgTexture* pTexture)
+{
+    VkFormatProperties props;
+    vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice,
+                                        pTexture->image.format, &props);
+
+    if (!(props.optimalTilingFeatures &
+          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+        YG_ERROR("Texture image format does not support linear blitting");
+    }
+
+    VkCommandBuffer cmd = ygCmdBegin();
+
+    VkImageSubresourceRange subresourceRange = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1,
+    };
+
+    int32_t mipWidth = pTexture->image.width;
+    int32_t mipHeight = pTexture->image.height;
+
+    for (uint32_t i = 1; i < pTexture->image.mipLevels; i++) {
+        subresourceRange.baseMipLevel = i - 1;
+
+        ygImageBarrier(
+            cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
+            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pTexture->image.image,
+            &subresourceRange);
+
+        VkImageBlit2 region = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+            .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .mipLevel = i - 1,
+                               .baseArrayLayer = 0,
+                               .layerCount = 1},
+            .srcOffsets = {{0, 0, 0}, {mipWidth, mipHeight, 1}},
+            .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .mipLevel = i,
+                               .baseArrayLayer = 0,
+                               .layerCount = 1},
+            .dstOffsets = {{0, 0, 0},
+                           {mipWidth > 1 ? mipWidth / 2 : 1,
+                            mipHeight > 1 ? mipHeight / 2 : 1, 1}},
+        };
+
+        VkBlitImageInfo2 blitImageInfo = {
+            .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+            .srcImage = pTexture->image.image,
+            .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            .dstImage = pTexture->image.image,
+            .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            .regionCount = 1,
+            .pRegions = &region,
+            .filter = VK_FILTER_NEAREST,
+        };
+
+        vkCmdBlitImage2(cmd, &blitImageInfo);
+
+        ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
+                       VK_ACCESS_2_TRANSFER_READ_BIT,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_READ_BIT,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       pTexture->image.image, &subresourceRange);
+
+        if (mipWidth > 1) {
+            mipWidth /= 2;
+        }
+        if (mipHeight > 1) {
+            mipHeight /= 2;
+        }
+    }
+
+    subresourceRange.baseMipLevel = pTexture->image.mipLevels - 1;
+
+    ygImageBarrier(
+        cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, pTexture->image.image,
+        &subresourceRange);
+
+    ygCmdEnd(cmd);
+}
+
+static void createTexture(YgTexture* pTexture, enum YgTextureType type,
+                          VkFormat format, const void* pData, uint32_t width,
+                          uint32_t height, uint32_t channels, bool mipmaps)
+{
+    uint32_t mipLevels = 1;
+    if (mipmaps) {
+        mipLevels = (uint32_t)floor(log2(YG_MAX(width, height))) + 1;
+    }
+
+    ygCreateImage(width, height, mipLevels, VK_SAMPLE_COUNT_1_BIT, format,
+                  VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTexture->image);
+
+    if (pData) {
+        VkDeviceSize size = width * height * channels;
+
+        YgBuffer staging;
+        ygCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       &staging);
+
+        ygCopyBufferFromHost(&staging, pData, size, 0);
+
+        VkCommandBuffer cmd = ygCmdBegin();
+
+        ygImageBarrier(
+            cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            pTexture->image.image, NULL);
+
+        VkBufferImageCopy region = {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                 .mipLevel = 0,
+                                 .baseArrayLayer = 0,
+                                 .layerCount = 1},
+            .imageOffset = {0, 0},
+            .imageExtent = {width, height, 1},
+        };
+
+        vkCmdCopyBufferToImage(cmd, staging.buffer, pTexture->image.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                               &region);
+
+        ygCmdEnd(cmd);
+
+        if (mipmaps) {
+            generateMipmaps(pTexture);
+        } else {
+            cmd = ygCmdBegin();
+            ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                           VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_READ_BIT,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           pTexture->image.image, NULL);
+            ygCmdEnd(cmd);
+        }
+
+        ygDestroyBuffer(&staging);
+    }
+
+    ygCreateImageView(&pTexture->image, VK_IMAGE_ASPECT_COLOR_BIT);
+
+    pTexture->imageInfo = (VkDescriptorImageInfo){
+        .sampler = NULL,
+        .imageView = pTexture->image.imageView,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+}
+
+void ygCreateTexture(enum YgTextureType type, VkFormat format,
+                     const void* pData, uint32_t width, uint32_t height,
+                     uint32_t channels, bool generateMipmaps,
+                     YgTexture* pTexture)
+{
+    createTexture(pTexture, type, format, pData, width, height, channels,
+                  generateMipmaps);
+}
+
+#ifdef YGGDRASIL_STBI
+void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
+                             const char* pPath, bool generateMipmaps,
+                             YgTexture* pTexture)
+{
+    YG_INFO("Loading texture from %s", pPath);
+
+    stbi_set_flip_vertically_on_load(1);
+
+    int width, height, channels;
+
+    stbi_uc* pData =
+        stbi_load(pPath, &width, &height, &channels, STBI_rgb_alpha);
+    channels = STBI_rgb_alpha;
+
+    if (!pData) {
+        YG_ERROR("Failed to load texture.");
+        return;
+    }
+
+    createTexture(pTexture, type, format, pData, width, height, channels,
+                  generateMipmaps);
+
+    stbi_image_free(pData);
+}
+#endif
+
+void ygDestroyTexture(YgTexture* pTexture)
+{
+    ygDestroyImage(&pTexture->image);
+}
+
+VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
+                                            uint32_t binding)
+{
+    return (VkWriteDescriptorSet){
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = binding,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &pTexture->imageInfo,
+    };
+}
+
+void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler)
+{
+    pTexture->imageInfo.sampler = pSampler->sampler;
 }
 
 #endif
