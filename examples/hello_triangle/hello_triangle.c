@@ -47,7 +47,6 @@ void createWindow()
 void createInstance()
 {
     uint32_t instanceExtensionCount;
-    glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
     const char** ppInstanceExtensions =
         glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
 

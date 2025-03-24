@@ -44,6 +44,8 @@ extern "C" {
 
 #include <vulkan/vulkan.h>
 
+// Define YGGDRASIL_STBI if stb_image.h is available. This allows for texture
+// loading from file.
 #ifdef YGGDRASIL_STBI
 #include "stb_image.h"
 #endif
@@ -62,8 +64,10 @@ extern "C" {
 #include <csignal>
 #endif
 
+// Get the length of an array. Don't use for pointers!
 #define YG_ARRAY_LEN(x) (uint32_t)(sizeof(x) / sizeof *(x))
 
+// Memory allocation macros. Overload to use custom allocations.
 #ifndef YG_MALLOC
 #define YG_MALLOC(sz) ygCheckedMalloc(sz)
 #endif
@@ -75,6 +79,9 @@ extern "C" {
 #ifndef YG_FREE
 #define YG_FREE(p) free(p)
 #endif
+
+
+// Error handling and logging //
 
 struct VulkanErrors {
     VkResult result;
@@ -129,30 +136,36 @@ struct VulkanErrors {
      "VK_ERROR_INVALID_DEVICE_ADDRESS_EXT"},
 };
 
+// Log an info message
 #define YG_INFO(fmt, ...) fprintf(stdout, "INFO: " fmt "\n", ##__VA_ARGS__);
 
 #ifdef NDEBUG
 #define YG_DEBUG(fmt, ...)
 #else
+// Log a debug message. Only visible if NDEBUG is not defined.
 #define YG_DEBUG(fmt, ...)                                                     \
     fprintf(stdout, "\x1B[1;92mDEBUG: \x1B[0m" fmt "\n", ##__VA_ARGS__);
 #endif
 
+// Log a warning message
 #define YG_WARNING(fmt, ...)                                                   \
     fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__,    \
             __LINE__, ##__VA_ARGS__);
 
 #ifdef NDEBUG
+// Log an error message
 #define YG_ERROR(fmt, ...)                                                     \
     fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
             __LINE__, ##__VA_ARGS__);
 #else
 #if YGGDRASIL_WINDOWS
+// Log an error message. Will cause a breakpoint if NDEBUG is not defined.
 #define YG_ERROR(fmt, ...)                                                     \
     fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
             __LINE__, ##__VA_ARGS__);                                          \
     __debugbreak();
 #elif YGGDRASIL_LINUX
+// Log an error message. Will cause a SIGTRAP if NDEBUG is not defined.
 #define YG_ERROR(fmt, ...)                                                     \
     fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
             __LINE__, ##__VA_ARGS__);                                          \
@@ -160,6 +173,7 @@ struct VulkanErrors {
 #endif
 #endif
 
+// Check for Vulkan function call for errors
 #define VK_CHECK(x)                                                            \
     do {                                                                       \
         VkResult res = x;                                                      \
@@ -172,39 +186,54 @@ struct VulkanErrors {
         }                                                                      \
     } while (0)
 
+
+// Yggdrasil type definitions //
+
+// Properties of the chosen physical device
 typedef struct YgDeviceProperties {
     VkPhysicalDeviceProperties physicalDevice;
     VkPhysicalDeviceMemoryProperties memory;
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingPipeline;
 } YgDeviceProperties;
 
+// Device contains a Vulkan context for rendering. The Yggdrasil device is
+// monolithic and is setup through ygCreateInstance() and ygCreateDevice().
+// Release resources with ygDestroyDevice() and ygDestroyInstance().
 typedef struct YgDevice {
     VkInstance instance;
     VkPhysicalDevice physicalDevice;
     VkDevice device;
     VkSurfaceKHR surface;
     YgDeviceProperties properties;
-    uint32_t queueFamilyIndex;
     VkCommandPool commandPool;
     VkQueue queue;
 #ifndef NDEBUG
     VkDebugUtilsMessengerEXT debugMessenger;
 #endif
+    uint32_t queueFamilyIndex;
     bool vsync;
 } YgDevice;
 
+// Swapchain abstracts the handling of swapchain images and frames in flight.
+// The Yggdrasil swapchain is monolithic and is setup through
+// ygCreateSwapchain(). Use ygAcquiteNextImage() and ygPresent() to acquire and
+// present images from the swapchain respectively. The swapchain can be
+// recreated with ygRecreateSwapchain() if the framebuffer size changed. The
+// framebufferSizeCallback() function pointer will be used to retrieve the new
+// framebuffer size. Release resources with ygDestroySwapchain().
 typedef struct YgSwapchain {
     VkSwapchainKHR swapchain;
     VkFormat format;
     VkExtent2D extent;
+    bool recreated;
 
     void (*framebufferSizeCallback)(uint32_t*, uint32_t*);
 
     struct SupportDetails {
         VkSurfaceCapabilitiesKHR capabilities;
         VkSurfaceFormatKHR* formats;
-        uint32_t formatCount;
         VkPresentModeKHR* presentModes;
+        uint32_t formatCount;
         uint32_t presentCount;
     } supportDetails;
 
@@ -219,10 +248,15 @@ typedef struct YgSwapchain {
     VkFence* inFlightFences;
     uint32_t framesInFlight;
     uint32_t inFlightIndex;
-
-    bool recreated;
 } YgSwapchain;
 
+// Buffer abstracts a Vulkan buffer and memory allocation. Prefer to use large
+// buffers and offsets than many small buffers, that would cause many small
+// allocations. Buffers are created with ygCreateBuffer(). Copy data from host
+// to the device allocated buffer with ygCopyBufferFromHost(). A buffer with
+// host coherent memory will always be mapped on pHostMap. When copying buffers
+// from host to device with a non-host coherent memory, a staging buffer will be
+// used. Realse resources with ygDestroyDevice().
 typedef struct YgBuffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -230,8 +264,12 @@ typedef struct YgBuffer {
     VkMemoryPropertyFlags properties;
     VkDeviceSize size;
     void* pHostMap;
+    VkDescriptorBufferInfo bufferInfo;
 } YgBuffer;
 
+// Image abstracts a Vulkan image, image view and memory allocation. Use
+// ygCreateImage() to create a new image and ygCreateImageView() to create an
+// image view for a created image. Release resources with ygDestroyImage().
 typedef struct YgImage {
     VkImage image;
     VkImageView imageView;
@@ -243,10 +281,13 @@ typedef struct YgImage {
     VkImageTiling tiling;
 } YgImage;
 
+// Sampler abstracts a Vulkan sampler. Create with ygCreateSampler(). Release
+// resources with ygDestroySampler().
 typedef struct YgSampler {
     VkSampler sampler;
 } YgSampler;
 
+// Different textures types for creating textures.
 enum YgTextureType {
     YG_TEXTURE_1D,
     YG_TEXTURE_2D,
@@ -255,80 +296,259 @@ enum YgTextureType {
     YG_TEXTURE_TYPE_COUNT,
 };
 
+// Texture is a combination of an Yggdrasil image and sampler. Create a new
+// texture with ygCreateTexture() and passing it a pointer to the texture data.
+// If stb_image.h is available and YGGDRASIL_STBI has been defined, textures can
+// be created from files using ygCreateTextureFromFile(). Mipmaps are
+// automatically generated if specified. Use ygSetTextureSampler() to assign a
+// sampler for the texture. The write descriptor for the texture can be
+// retrieved with ygGetTextureDescriptor(). Release resource with
+// ygDestroyTexture().
 typedef struct YgTexture {
     YgImage image;
     VkDescriptorImageInfo imageInfo;
 } YgTexture;
 
+// Pass abstracts the use of dynamic rendering in Vulkan.
+typedef struct YgPass {
+    VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo;
+    VkExtent2D extent;
+    VkFormat* formats;
+    YgImage* colorAttachments;
+    uint32_t attachmentCount;
+    YgImage depthAttachment;
+    YgImage resolveAttachment;
+} YgPass;
+
+
+// Monolithic global variables //
+
 extern YgDevice ygDevice;
 extern YgSwapchain ygSwapchain;
 
+
+// Function declarations //
+
+/// <summary>
+/// Create a new instance. Handle is internally managed and accessible through
+/// ygDevice.
+/// </summary>
+/// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or
+/// VK_MAKE_API_VERSION()</param> <param name="ppInstanceExtensions">List of
+/// instance extensions to use</param> <param
+/// name="instanceExtensionCount">Number of instance extensions</param>
 void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
                       uint32_t instanceExtensionCount);
 
+/// <summary>
+/// Release resources for the instance.
+/// </summary>
 void ygDestroyInstance();
 
+/// <summary>
+/// Create a new device. Handle is internally managed and accessible through
+/// ygDevice.
+/// </summary>
+/// <param name="physicalDeviceIndex">Physical device index to use</param>
+/// <param name="ppDeviceExtensions">List of device extensions to use</param>
+/// <param name="deviceExtensionCount">Number of device extensions</param>
+/// <param name="features">Pointer to features that will be put in pNext of
+/// VkDeviceCreateInfo, can be NULL</param> <param name="surface">Surface to
+/// use</param>
 void ygCreateDevice(uint32_t physicalDeviceIndex,
                     const char** ppDeviceExtensions,
                     uint32_t deviceExtensionCount,
                     VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface);
 
+/// <summary>
+/// Release resources for the device.
+/// </summary>
 void ygDestroyDevice();
 
+/// <summary>
+/// Create a new swapchain. Handle is internally managed and accessible through
+/// ygSwapchain.
+/// </summary>
+/// <param name="framesInFlight">Number of frames in flight to use</param>
+/// <param name="framebufferSizeCallback">Callback function where the current
+/// framebuffer size can be retrieved</param>
 void ygCreateSwapchain(uint32_t framesInFlight,
                        void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
 
+/// <summary>
+/// Release the resources for the swapchain.
+/// </summary>
 void ygDestroySwapchain();
 
+/// <summary>
+/// Recreate the swapchain, for instance if the framebuffer size changed. New
+/// framebuffer size is retrieved through framebufferSizeCallback().
+/// </summary>
 void ygRecreateSwapchain();
 
+/// <summary>
+/// Acquire a new image from the swapchain. This call will block until an image
+/// is available.
+/// </summary>
+/// <returns>Command buffer to use to render to the new image</returns>
 VkCommandBuffer ygAcquireNextImage();
 
+/// <summary>
+/// Present an image to the swapchain by blitting it.
+/// </summary>
+/// <param name="cmd">Command buffer retrieved from a call to
+/// ygAcquireNextImage()</param> <param name="pImage"></param>
 void ygPresent(VkCommandBuffer cmd, YgImage* pImage);
 
+/// <summary>
+/// Create a new buffer.
+/// </summary>
+/// <param name="size">Size of buffer in bytes</param>
+/// <param name="usage">How the buffer will be used</param>
+/// <param name="properties">Properties of the memory to allocate</param>
+/// <param name="pBuffer">Where the created buffer will be stored</param>
 void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                     VkMemoryPropertyFlags properties, YgBuffer* pBuffer);
 
+/// <summary>
+/// Release resources for a buffer.
+/// </summary>
+/// <param name="pBuffer">Buffer to destroy</param>
 void ygDestroyBuffer(YgBuffer* pBuffer);
 
+/// <summary>
+/// Copy data from host memory to a buffer's device memory. If buffer's memory
+/// is not host coherent, a staging buffer will be used.
+/// </summary>
+/// <param name="pBuffer">Buffer to use</param>
+/// <param name="pData">Pointer to data to copy</param>
+/// <param name="size">Size of data to copy in bytes</param>
+/// <param name="offset">Offset into buffer's device memory to put the
+/// data</param>
 void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
                           VkDeviceSize size, VkDeviceSize offset);
 
+/// <summary>
+/// Get the write descriptor of a buffer.
+/// </summary>
+/// <param name="pBuffer">Buffer to use</param>
+/// <param name="binding">In which binding the buffer descriptor should be placed</param>
+/// <param name="offset">Offset into buffer to bind</param>
+/// <param name="range">Range in bytes to bind, can be VK_WHOLE_SIZE</param>
+/// <returns>A write descriptor set</returns>
+VkWriteDescriptorSet ygGetBufferDescriptor(const YgBuffer* pBuffer,
+                                           uint32_t binding,
+                                           VkDeviceSize offset,
+                                           VkDeviceSize range);
+
+/// <summary>
+/// Create a new image.
+/// </summary>
+/// <param name="width">Width of image</param>
+/// <param name="height">Height of image</param>
+/// <param name="mipLevels">Mipmap levels to use</param>
+/// <param name="samples">Sample count</param>
+/// <param name="format">Format to use</param>
+/// <param name="tiling">Tiling to use</param>
+/// <param name="usage">How the image will be used</param>
+/// <param name="properties">Properties of the memory to allocate</param>
+/// <param name="pImage">Where the created image will be stored</param>
 void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                    VkSampleCountFlagBits samples, VkFormat format,
                    VkImageTiling tiling, VkImageUsageFlags usage,
                    VkMemoryPropertyFlags properties, YgImage* pImage);
 
+/// <summary>
+/// Release resources for an image.
+/// </summary>
+/// <param name="pImage">Image to destroy</param>
 void ygDestroyImage(YgImage* pImage);
 
+/// <summary>
+/// Create an image view for an image.
+/// </summary>
+/// <param name="pImage">Image to use</param>
+/// <param name="aspectFlags">Aspect flags to use for image view</param>
 void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags);
 
+/// <summary>
+/// Create a new sampler.
+/// </summary>
+/// <param name="magFilter">Magnification filter to use</param>
+/// <param name="minFilter">Minification filter to use</param>
+/// <param name="mipmapMode">Mipmap mode to use</param>
+/// <param name="addressModeU">Address mode U (wrapping) to use</param>
+/// <param name="addressModeV">Address mode V (wrapping) to use</param>
+/// <param name="addressModeW">Address mode W (wrapping) to use</param>
+/// <param name="pSampler">Where the created sampler will be stored</param>
 void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
                      VkSamplerMipmapMode mipmapMode,
                      VkSamplerAddressMode addressModeU,
                      VkSamplerAddressMode addressModeV,
                      VkSamplerAddressMode addressModeW, YgSampler* pSampler);
 
+/// <summary>
+/// Release resources for a sampler.
+/// </summary>
+/// <param name="pSampler">Sampler to destroy</param>
 void ygDestroySampler(YgSampler* pSampler);
 
+/// <summary>
+/// Create a new texture.
+/// </summary>
+/// <param name="type">Type of texture to create</param>
+/// <param name="format">Format to use</param>
+/// <param name="pData">Pointer to data with texture pixel values</param>
+/// <param name="width">Width of texture</param>
+/// <param name="height">Height of texture</param>
+/// <param name="channels">Number of channels in texture</param>
+/// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
+/// <param name="pTexture">Where the created texture will be stored</param>
 void ygCreateTexture(enum YgTextureType type, VkFormat format,
                      const void* pData, uint32_t width, uint32_t height,
                      uint32_t channels, bool generateMipmaps,
                      YgTexture* pTexture);
 
 #ifdef YGGDRASIL_STBI
+/// <summary>
+/// Create a new texture from file.
+/// </summary>
+/// <param name="type">Type of texture to create</param>
+/// <param name="format">Format to use</param>
+/// <param name="pPath">Path to texture file</param>
+/// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
+/// <param name="pTexture">Where the created texture will be stored</param>
 void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
                              const char* pPath, bool generateMipmaps,
                              YgTexture* pTexture);
 #endif
 
+/// <summary>
+/// Release resources for a texture.
+/// </summary>
+/// <param name="pTexture">Texture to destroy</param>
 void ygDestroyTexture(YgTexture* pTexture);
 
+/// <summary>
+/// Set which sampler to use for a texture.
+/// </summary>
+/// <param name="pTexture">Texture to use</param>
+/// <param name="pSampler">Sampler to use</param>
+void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
+
+/// <summary>
+/// Get the write descriptor of a texture.
+/// </summary>
+/// <param name="pTexture">Texture to use</param>
+/// <param name="binding">In which binding the texture descriptor should be
+/// placed</param> <returns>A write descriptor set</returns>
 VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
                                             uint32_t binding);
 
-void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
 
+// Inlined helper functions //
+
+// Call malloc and check for valid pointer.
 inline void* ygCheckedMalloc(size_t sz)
 {
     void* p = malloc(sz);
@@ -338,11 +558,13 @@ inline void* ygCheckedMalloc(size_t sz)
     return p;
 }
 
+// Align value to alignment.
 inline VkDeviceSize ygAlignTo(VkDeviceSize value, VkDeviceSize alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
+// Create and begin a new one-time-use command buffer.
 inline VkCommandBuffer ygCmdBegin()
 {
     if (!ygDevice.device) {
@@ -369,6 +591,7 @@ inline VkCommandBuffer ygCmdBegin()
     return cmd;
 }
 
+// Submit and destroy a one-time-use command buffer.
 inline void ygCmdEnd(VkCommandBuffer cmd)
 {
     if (!ygDevice.device) {
@@ -487,16 +710,27 @@ inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
     vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
+// Define YGGDRASIL_IMPLEMENTATION in exactly one compilation unit before
+// including yggdrasil.h
 #ifdef YGGDRASIL_IMPLEMENTATION
+
+
+// Monolithic global variables //
 
 static YgDevice ygDevice;
 static YgSwapchain ygSwapchain;
 
+
+// Helper macros //
+
+// Reset the memory of an object after releasing its resources.
 #define YG_RESET(x) memset((x), 0, sizeof(*(x)))
 
+// Get the max of two values
 #define YG_MAX(x, y) ((x) > (y) ? (x) : (y))
+// Get the min of two values
 #define YG_MIN(x, y) ((x) < (y) ? (x) : (y))
-
+// Clamp a value to an interval
 #define YG_CLAMP(x, low, high) (YG_MIN(YG_MAX((x), (low)), (high)))
 
 // Macro for loading a device function pointers as Xvk...()
@@ -1294,6 +1528,8 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
 
     VK_CHECK(vkCreateBuffer(ygDevice.device, &ci, NULL, &pBuffer->buffer));
 
+    pBuffer->bufferInfo.buffer = pBuffer->buffer;
+
     VkMemoryRequirements memReqs;
     vkGetBufferMemoryRequirements(ygDevice.device, pBuffer->buffer, &memReqs);
 
@@ -1373,6 +1609,19 @@ void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
         char* pOffsettedHostMap = (char*)pBuffer->pHostMap + offset;
         memcpy(pOffsettedHostMap, pData, size);
     }
+}
+
+VkWriteDescriptorSet ygGetBufferDescriptor(const YgBuffer* pBuffer,
+                                           uint32_t binding)
+{
+    return (VkWriteDescriptorSet){
+        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = binding,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pBufferInfo = &pBuffer->bufferInfo,
+    };
 }
 
 void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
@@ -1700,6 +1949,11 @@ void ygDestroyTexture(YgTexture* pTexture)
     ygDestroyImage(&pTexture->image);
 }
 
+void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler)
+{
+    pTexture->imageInfo.sampler = pSampler->sampler;
+}
+
 VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
                                             uint32_t binding)
 {
@@ -1711,11 +1965,6 @@ VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .pImageInfo = &pTexture->imageInfo,
     };
-}
-
-void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler)
-{
-    pTexture->imageInfo.sampler = pSampler->sampler;
 }
 
 #endif
