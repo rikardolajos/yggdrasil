@@ -312,12 +312,12 @@ typedef struct YgTexture {
 // Pass abstracts the use of dynamic rendering in Vulkan.
 typedef struct YgPass {
     VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo;
-    VkExtent2D extent;
-    VkFormat* formats;
-    YgImage* colorAttachments;
-    uint32_t attachmentCount;
-    YgImage depthAttachment;
-    YgImage resolveAttachment;
+    VkRenderingAttachmentInfo* pRenderingAttachmentInfos;
+    VkFormat* pFormats;
+    YgImage* pColorAttachments;
+    uint32_t colorAttachmentCount;
+    YgImage* pDepthAttachment;
+    YgImage* pResolveAttachment;
 } YgPass;
 
 
@@ -364,6 +364,12 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 /// Release resources for the device.
 /// </summary>
 void ygDestroyDevice();
+
+/// <summary>
+/// Get the sample count of the current device.
+/// </summary>
+/// <returns>Sample count</returns>
+VkSampleCountFlagBits ygGetDeviceSampleCount();
 
 /// <summary>
 /// Create a new swapchain. Handle is internally managed and accessible through
@@ -432,12 +438,11 @@ void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
 /// Get the write descriptor of a buffer.
 /// </summary>
 /// <param name="pBuffer">Buffer to use</param>
-/// <param name="binding">In which binding the buffer descriptor should be placed</param>
-/// <param name="offset">Offset into buffer to bind</param>
+/// <param name="binding">In which binding the buffer descriptor should be
+/// placed</param> <param name="offset">Offset into buffer to bind</param>
 /// <param name="range">Range in bytes to bind, can be VK_WHOLE_SIZE</param>
 /// <returns>A write descriptor set</returns>
-VkWriteDescriptorSet ygGetBufferDescriptor(const YgBuffer* pBuffer,
-                                           uint32_t binding,
+VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
                                            VkDeviceSize offset,
                                            VkDeviceSize range);
 
@@ -544,6 +549,21 @@ void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
 /// placed</param> <returns>A write descriptor set</returns>
 VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
                                             uint32_t binding);
+
+void ygCreatePass(YgImage* pColorAttachments, uint32_t colorAttachmentCount,
+                  YgImage* pDepthAttachment, YgImage* pResolveAttachment,
+                  YgPass* pPass);
+
+void ygDestroyPass(YgPass* pPass);
+
+void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
+                    uint32_t colorAttachmentCount, YgImage* pResolveAttachment,
+                    YgImage* pDepthAttachment);
+
+void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
+                 VkClearValue clearValue, VkAttachmentLoadOp loadOp);
+
+void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd);
 
 
 // Inlined helper functions //
@@ -1063,6 +1083,34 @@ void ygDestroyDevice()
     }
 
     YG_RESET(&ygDevice);
+}
+
+VkSampleCountFlagBits ygGetDeviceSampleCount()
+{
+    VkSampleCountFlags counts =
+        ygDevice.properties.physicalDevice.limits.framebufferColorSampleCounts &
+        ygDevice.properties.physicalDevice.limits.framebufferDepthSampleCounts;
+
+    if (counts & VK_SAMPLE_COUNT_64_BIT) {
+        return VK_SAMPLE_COUNT_64_BIT;
+    }
+    if (counts & VK_SAMPLE_COUNT_32_BIT) {
+        return VK_SAMPLE_COUNT_32_BIT;
+    }
+    if (counts & VK_SAMPLE_COUNT_16_BIT) {
+        return VK_SAMPLE_COUNT_16_BIT;
+    }
+    if (counts & VK_SAMPLE_COUNT_8_BIT) {
+        return VK_SAMPLE_COUNT_8_BIT;
+    }
+    if (counts & VK_SAMPLE_COUNT_4_BIT) {
+        return VK_SAMPLE_COUNT_4_BIT;
+    }
+    if (counts & VK_SAMPLE_COUNT_2_BIT) {
+        return VK_SAMPLE_COUNT_2_BIT;
+    }
+
+    return VK_SAMPLE_COUNT_1_BIT;
 }
 
 static void querySupport()
@@ -1611,9 +1659,16 @@ void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
     }
 }
 
-VkWriteDescriptorSet ygGetBufferDescriptor(const YgBuffer* pBuffer,
-                                           uint32_t binding)
+VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
+                                           VkDeviceSize offset,
+                                           VkDeviceSize range)
 {
+    pBuffer->bufferInfo = (VkDescriptorBufferInfo){
+        .buffer = pBuffer->buffer,
+        .offset = offset,
+        .range = range,
+    };
+
     return (VkWriteDescriptorSet){
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstBinding = binding,
@@ -1629,6 +1684,10 @@ void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                    VkImageTiling tiling, VkImageUsageFlags usage,
                    VkMemoryPropertyFlags properties, YgImage* pImage)
 {
+    if (!ygDevice.device) {
+        YG_ERROR("Device not initialized");
+    }
+
     *pImage = (YgImage){
         .width = width,
         .height = height,
@@ -1682,6 +1741,10 @@ void ygDestroyImage(YgImage* pImage)
 
 void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags)
 {
+    if (!ygDevice.device) {
+        YG_ERROR("Device not initialized");
+    }
+
     VkImageViewCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = pImage->image,
@@ -1707,6 +1770,10 @@ void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
                      VkSamplerAddressMode addressModeV,
                      VkSamplerAddressMode addressModeW, YgSampler* pSampler)
 {
+    if (!ygDevice.device) {
+        YG_ERROR("Device not initialized");
+    }
+
     VkSamplerCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = magFilter,
@@ -1965,6 +2032,118 @@ VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         .pImageInfo = &pTexture->imageInfo,
     };
+}
+
+static createPass(YgPass* pPass, YgImage* pColorAttachments,
+                  uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+                  YgImage* pResolveAttachment)
+{
+    *pPass = (YgPass){
+        .pRenderingAttachmentInfos =
+            YG_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
+        .pFormats = YG_MALLOC(colorAttachmentCount * sizeof(VkFormat)),
+        .pColorAttachments = pColorAttachments,
+        .colorAttachmentCount = colorAttachmentCount,
+        .pDepthAttachment = pDepthAttachment,
+        .pResolveAttachment = pResolveAttachment,
+    };
+
+    for (uint32_t i = 0; i < colorAttachmentCount; i++) {
+        pPass->pRenderingAttachmentInfos[i] = (VkRenderingAttachmentInfo){
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = pPass->pColorAttachments[i].imageView,
+            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .resolveMode = pPass->pResolveAttachment
+                               ? VK_RESOLVE_MODE_AVERAGE_BIT
+                               : VK_RESOLVE_MODE_NONE,
+            .resolveImageView = pPass->pResolveAttachment
+                                    ? pPass->pResolveAttachment->imageView
+                                    : NULL,
+            .resolveImageLayout = pPass->pResolveAttachment
+                                      ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                      : VK_IMAGE_LAYOUT_UNDEFINED,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        pPass->pFormats[i] = pPass->pColorAttachments[i].format;
+    }
+
+    pPass->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = colorAttachmentCount,
+        .pColorAttachmentFormats = pPass->pFormats,
+        .depthAttachmentFormat = pDepthAttachment->format,
+    };
+}
+
+void ygCreatePass(YgImage* pColorAttachments, uint32_t colorAttachmentCount,
+                  YgImage* pDepthAttachment, YgImage* pResolveAttachment,
+                  YgPass* pPass)
+{
+    createPass(pPass, pColorAttachments, colorAttachmentCount, pDepthAttachment,
+               pResolveAttachment);
+}
+
+void ygDestroyPass(YgPass* pPass)
+{
+    YG_FREE(pPass->pRenderingAttachmentInfos);
+    YG_FREE(pPass->pFormats);
+
+    YG_RESET(pPass);
+}
+
+void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
+                    uint32_t colorAttachmentCount, YgImage* pResolveAttachment,
+                    YgImage* pDepthAttachment)
+{
+    YG_FREE(pPass->pRenderingAttachmentInfos);
+    YG_FREE(pPass->pFormats);
+    createPass(pPass, pColorAttachments, colorAttachmentCount, pDepthAttachment,
+               pResolveAttachment);
+}
+
+void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
+                 VkClearValue clearValue, VkAttachmentLoadOp loadOp)
+{
+    for (uint32_t i = 0; i < pPass->colorAttachmentCount; i++) {
+        pPass->pRenderingAttachmentInfos[i].clearValue = clearValue;
+        pPass->pRenderingAttachmentInfos[i].loadOp = loadOp;
+    }
+
+    VkRenderingAttachmentInfo depthAttachmentInfo;
+    if (pPass->pDepthAttachment) {
+        depthAttachmentInfo = (VkRenderingAttachmentInfo){
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = pPass->pDepthAttachment->imageView,
+            .imageLayout =
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .clearValue = clearValue,
+        };
+    }
+
+    VkExtent2D extent = {
+        .width = pPass->pColorAttachments[0].width,
+        .height = pPass->pColorAttachments[0].height,
+    };
+
+    VkRenderingInfo renderingInfo = {
+        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea = {.offset = {0, 0}, .extent = extent},
+        .layerCount = 1,
+        .colorAttachmentCount = pPass->colorAttachmentCount,
+        .pColorAttachments = pPass->pRenderingAttachmentInfos,
+        .pDepthAttachment =
+            pPass->pDepthAttachment ? &depthAttachmentInfo : NULL,
+        .pStencilAttachment = NULL,
+    };
+
+    vkCmdBeginRendering(cmd, &renderingInfo);
+}
+
+void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd)
+{
+    vkCmdEndRendering(cmd);
 }
 
 #endif

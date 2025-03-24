@@ -9,7 +9,6 @@
 
 
 GLFWwindow* pWindow;
-VkSurfaceKHR surface;
 
 //
 uint8_t shaderModule[] = {0xff};
@@ -54,7 +53,7 @@ void createInstance()
                      instanceExtensionCount);
 }
 
-void createDevice()
+void createDevice(VkSurfaceKHR surface)
 {
     const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
@@ -86,6 +85,34 @@ void createDevice()
                    &features, surface);
 }
 
+void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment,
+                       YgImage* pResolveAttachment)
+{
+    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
+                  ygGetDeviceSampleCount(), VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_STORAGE_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
+
+    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
+                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_STORAGE_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pDepthAttachment);
+
+    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
+                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_STORAGE_BIT |
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pResolveAttachment);
+}
+
 void cleanUp()
 {
     ygDestroySwapchain();
@@ -101,33 +128,57 @@ int main()
 
     createInstance();
 
+    VkSurfaceKHR surface;
     VK_CHECK(
         glfwCreateWindowSurface(ygDevice.instance, pWindow, NULL, &surface));
 
-    createDevice();
+    createDevice(surface);
 
     ygCreateSwapchain(2, framebufferSizeCallback);
 
+    YgImage colorAttachment;
+    YgImage depthAttachment;
+    YgImage resolveAttachment;
+    createAttachments(&colorAttachment, &depthAttachment, &resolveAttachment);
 
-
-    YgImage image;
-    //ygCreateImage(&image);
+    YgPass pass;
+    ygCreatePass(&colorAttachment, 1, &depthAttachment, &resolveAttachment, &pass);
 
     while (!glfwWindowShouldClose(pWindow)) {
         if (ygSwapchain.recreated) {
-            //
+            ygDestroyImage(&colorAttachment);
+            ygDestroyImage(&depthAttachment);
+            ygDestroyImage(&resolveAttachment);
+            createAttachments(&colorAttachment, &depthAttachment,
+                              &resolveAttachment);
+            ygRecreatePass(&pass, &colorAttachment, 1, &depthAttachment,
+                         &resolveAttachment);
         }
 
         VkCommandBuffer cmd = ygAcquireNextImage();
+
+        ygBeginPass(
+            &pass, cmd,
+            (VkClearValue){.color = {{0.0f, 0.0f, 0.0f, 0.0f}},
+                           .depthStencil = {.depth = 1.0f, .stencil = 0}},
+            VK_ATTACHMENT_LOAD_OP_CLEAR);
 
         // Push descriptor
 
         // Draw
 
-        ygPresent(cmd, &image);
+        ygEndPass(&pass, cmd);
+
+        ygPresent(cmd, &colorAttachment);
 
         glfwPollEvents();
     }
+
+    ygDestroyImage(&colorAttachment);
+    ygDestroyImage(&depthAttachment);
+    ygDestroyImage(&resolveAttachment);
+
+    ygDestroyPass(&pass);
 
     cleanUp();
 }
