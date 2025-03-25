@@ -85,32 +85,41 @@ void createDevice(VkSurfaceKHR surface)
                    &features, surface);
 }
 
-void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment,
-                       YgImage* pResolveAttachment)
+void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment)
 {
     ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
-                  ygGetDeviceSampleCount(), VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
                   VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_STORAGE_BIT |
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
 
+    VkFormat depthFormat = ygFindDepthFormat();
     ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
-                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
-                  VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_STORAGE_BIT |
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                  VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pDepthAttachment);
 
-    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
-                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
-                  VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_STORAGE_BIT |
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pResolveAttachment);
+    // Transition depth attachment for depth use
+    VkImageSubresourceRange depthSubresourceRange = {
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = 1};
+    if (depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+        depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) {
+        depthSubresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+    VkCommandBuffer cmd = ygCmdBegin();
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                   VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                   pDepthAttachment->image, &depthSubresourceRange);
+    ygCmdEnd(cmd);
 }
 
 void cleanUp()
@@ -138,24 +147,22 @@ int main()
 
     YgImage colorAttachment;
     YgImage depthAttachment;
-    YgImage resolveAttachment;
-    createAttachments(&colorAttachment, &depthAttachment, &resolveAttachment);
+    createAttachments(&colorAttachment, &depthAttachment);
 
     YgPass pass;
-    ygCreatePass(&colorAttachment, 1, &depthAttachment, &resolveAttachment, &pass);
+    ygCreatePass(&colorAttachment, 1, &depthAttachment, NULL, &pass);
 
     while (!glfwWindowShouldClose(pWindow)) {
         if (ygSwapchain.recreated) {
             ygDestroyImage(&colorAttachment);
             ygDestroyImage(&depthAttachment);
-            ygDestroyImage(&resolveAttachment);
-            createAttachments(&colorAttachment, &depthAttachment,
-                              &resolveAttachment);
-            ygRecreatePass(&pass, &colorAttachment, 1, &depthAttachment,
-                         &resolveAttachment);
+            createAttachments(&colorAttachment, &depthAttachment);
+            ygRecreatePass(&pass, &colorAttachment, 1, &depthAttachment, NULL);
         }
 
         VkCommandBuffer cmd = ygAcquireNextImage();
+
+        ygTransitionForColorAttachment(cmd, &colorAttachment);
 
         ygBeginPass(
             &pass, cmd,
@@ -163,11 +170,14 @@ int main()
                            .depthStencil = {.depth = 1.0f, .stencil = 0}},
             VK_ATTACHMENT_LOAD_OP_CLEAR);
 
+
         // Push descriptor
 
         // Draw
 
         ygEndPass(&pass, cmd);
+
+        ygTransitionForBlitting(cmd, &colorAttachment);
 
         ygPresent(cmd, &colorAttachment);
 
@@ -176,7 +186,6 @@ int main()
 
     ygDestroyImage(&colorAttachment);
     ygDestroyImage(&depthAttachment);
-    ygDestroyImage(&resolveAttachment);
 
     ygDestroyPass(&pass);
 

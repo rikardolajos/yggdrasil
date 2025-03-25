@@ -83,10 +83,10 @@ extern "C" {
 
 // Error handling and logging //
 
-struct VulkanErrors {
+struct VulkanResult {
     VkResult result;
     const char* string;
-} ygVulkanErrors[] = {
+} ygVulkanResults[] = {
     {VK_SUCCESS, "VK_SUCCESS"},
     {VK_NOT_READY, "VK_NOT_READY"},
     {VK_TIMEOUT, "VK_TIMEOUT"},
@@ -156,7 +156,8 @@ struct VulkanErrors {
 // Log an error message
 #define YG_ERROR(fmt, ...)                                                     \
     fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
-            __LINE__, ##__VA_ARGS__);
+            __LINE__, ##__VA_ARGS__);                                          \
+    abort();
 #else
 #if YGGDRASIL_WINDOWS
 // Log an error message. Will cause a breakpoint if NDEBUG is not defined.
@@ -178,9 +179,9 @@ struct VulkanErrors {
     do {                                                                       \
         VkResult res = x;                                                      \
         if (res) {                                                             \
-            for (size_t i = 0; i < YG_ARRAY_LEN(ygVulkanErrors); i++) {        \
-                if ((res) == ygVulkanErrors[i].result) {                       \
-                    YG_ERROR("%s", ygVulkanErrors[i].string);                  \
+            for (size_t i = 0; i < YG_ARRAY_LEN(ygVulkanResults); i++) {       \
+                if ((res) == ygVulkanResults[i].result) {                      \
+                    YG_ERROR("%s", ygVulkanResults[i].string);                 \
                 }                                                              \
             }                                                                  \
         }                                                                      \
@@ -302,14 +303,19 @@ enum YgTextureType {
 // be created from files using ygCreateTextureFromFile(). Mipmaps are
 // automatically generated if specified. Use ygSetTextureSampler() to assign a
 // sampler for the texture. The write descriptor for the texture can be
-// retrieved with ygGetTextureDescriptor(). Release resource with
+// retrieved with ygGetTextureDescriptor(). Release resources with
 // ygDestroyTexture().
 typedef struct YgTexture {
     YgImage image;
     VkDescriptorImageInfo imageInfo;
 } YgTexture;
 
-// Pass abstracts the use of dynamic rendering in Vulkan.
+// Pass abstracts the use of dynamic rendering in Vulkan. Create a new pass with
+// ygCreatePass(). Before rendering with the pass call ygBeginPass() and call
+// ygEndPass() when done rendering with the pass. If the attachment changes
+// (resolution change for instance) then the pass should be recreated.
+// ygRecreatePass() can be used, or alternatively ygDestroyPass() and
+// ygCreatePass(). Release resources with ygDestroyPass().
 typedef struct YgPass {
     VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo;
     VkRenderingAttachmentInfo* pRenderingAttachmentInfos;
@@ -550,25 +556,64 @@ void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
 VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
                                             uint32_t binding);
 
+/// <summary>
+/// Create a new pass.
+/// </summary>
+/// <param name="pColorAttachments">List of images that should be used as color
+/// attachments</param> <param name="colorAttachmentCount">Number of color
+/// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
+/// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
+/// use, can be NULL</param> <param name="pPass">Where the created pass will be
+/// stored</param>
 void ygCreatePass(YgImage* pColorAttachments, uint32_t colorAttachmentCount,
                   YgImage* pDepthAttachment, YgImage* pResolveAttachment,
                   YgPass* pPass);
 
+/// <summary>
+/// Release resource for a pass
+/// </summary>
+/// <param name="pPass">Pass to destroy</param>
 void ygDestroyPass(YgPass* pPass);
 
+/// <summary>
+/// Recreate a pass if attachments changed. Same as calling ygDestroyPass()
+/// followed by ygCreatePass().
+/// </summary>
+/// <param name="pPass">Pass to recreate</param>
+/// <param name="pColorAttachments">List of images that should be used as color
+/// attachments</param> <param name="colorAttachmentCount">Number of color
+/// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
+/// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
+/// use, can be NULL</param>
 void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
-                    uint32_t colorAttachmentCount, YgImage* pResolveAttachment,
-                    YgImage* pDepthAttachment);
+                    uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+                    YgImage* pResolveAttachment);
 
+/// <summary>
+/// Begin dynamic rendering using a pass.
+/// </summary>
+/// <param name="pPass">Pass to use</param>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="clearValue">Clear value for attachments</param>
+/// <param name="loadOp">Load operation for attachments</param>
 void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
                  VkClearValue clearValue, VkAttachmentLoadOp loadOp);
 
+/// <summary>
+/// End dynamic rendering using a pass.
+/// </summary>
+/// <param name="pPass">Pass to use</param>
+/// <param name="cmd">Command buffer to use</param>
 void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd);
 
 
 // Inlined helper functions //
 
-// Call malloc and check for valid pointer.
+/// <summary>
+/// Call malloc and check for valid pointer.
+/// </summary>
+/// <param name="sz">Size in bytes to allocate</param>
+/// <returns>Pointer to allocated memory</returns>
 inline void* ygCheckedMalloc(size_t sz)
 {
     void* p = malloc(sz);
@@ -578,13 +623,21 @@ inline void* ygCheckedMalloc(size_t sz)
     return p;
 }
 
-// Align value to alignment.
+/// <summary>
+/// Align value to alignment.
+/// </summary>
+/// <param name="value">Value to align</param>
+/// <param name="alignment">Required alignment</param>
+/// <returns></returns>
 inline VkDeviceSize ygAlignTo(VkDeviceSize value, VkDeviceSize alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
 }
 
-// Create and begin a new one-time-use command buffer.
+/// <summary>
+/// Create and begin a new one-time-use command buffer.
+/// </summary>
+/// <returns>A new command buffer</returns>
 inline VkCommandBuffer ygCmdBegin()
 {
     if (!ygDevice.device) {
@@ -611,7 +664,10 @@ inline VkCommandBuffer ygCmdBegin()
     return cmd;
 }
 
-// Submit and destroy a one-time-use command buffer.
+/// <summary>
+/// Submit and destroy a one-time-use command buffer.
+/// </summary>
+/// <param name="cmd">Command buffer to submit and destroy</param>
 inline void ygCmdEnd(VkCommandBuffer cmd)
 {
     if (!ygDevice.device) {
@@ -632,6 +688,12 @@ inline void ygCmdEnd(VkCommandBuffer cmd)
     vkFreeCommandBuffers(ygDevice.device, ygDevice.commandPool, 1, &cmd);
 }
 
+/// <summary>
+/// Find a memory type given a type filter and required memory properties.
+/// </summary>
+/// <param name="typeFilter">Type filter to use</param>
+/// <param name="properties">Memory property flags</param>
+/// <returns>Index to memory type</returns>
 inline uint32_t ygFindMemoryType(uint32_t typeFilter,
                                  VkMemoryPropertyFlags properties)
 {
@@ -651,6 +713,15 @@ inline uint32_t ygFindMemoryType(uint32_t typeFilter,
     return UINT32_MAX;
 }
 
+/// <summary>
+/// Find a supported format from the current device, given a set of candidate
+/// formats.
+/// </summary>
+/// <param name="pCandidates">List of candidate formats</param>
+/// <param name="candidateCount">Number of candidates</param>
+/// <param name="tiling">Required image tiling</param>
+/// <param name="features"Format feature flags></param>
+/// <returns>A supported format</returns>
 inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates,
                                       uint32_t candidateCount,
                                       VkImageTiling tiling,
@@ -678,6 +749,10 @@ inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates,
     return VK_FORMAT_UNDEFINED;
 }
 
+/// <summary>
+/// Find a depth format supported by the current device.
+/// </summary>
+/// <returns>A supported depth format</returns>
 inline VkFormat ygFindDepthFormat()
 {
     VkFormat candidates[] = {
@@ -691,6 +766,19 @@ inline VkFormat ygFindDepthFormat()
         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
 
+/// <summary>
+/// Create an image barrier.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="srcStage">Stage to wait for</param>
+/// <param name="srcAccess">Type of access to wait for</param>
+/// <param name="dstStage">Stage before which the barrier has to take
+/// place</param> <param name="dstAccess">Type of acces before which the barrer
+/// has to take place</param> <param name="oldLayout">Previous image
+/// layout</param> <param name="newLayout">New image layout</param> <param
+/// name="image">Image to use</param> <param
+/// name="pSubresourceRange">Subresource range to use, can be NULL in which case
+/// a default subrange is used.</param>
 inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
                            VkAccessFlags2 srcAccess,
                            VkPipelineStageFlags2 dstStage,
@@ -728,6 +816,38 @@ inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
     };
 
     vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+}
+
+/// <summary>
+/// Transition the image layout of a color attachment for rendering. Previous
+/// layout is assumed to be VK_IMAGE_LAYOUT_UNDEFINED.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pImage">Image to transition</param>
+inline void ygTransitionForColorAttachment(VkCommandBuffer cmd, YgImage* pImage)
+{
+    ygImageBarrier(
+        cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
+            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        pImage->image, NULL);
+}
+
+/// <summary>
+/// Transition the image layout of a color attachment for blitting. Previous
+/// layout is assumed to be VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pImage">Image to transition</param>
+inline void ygTransitionForBlitting(VkCommandBuffer cmd, YgImage* pImage)
+{
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pImage->image, NULL);
 }
 
 // Define YGGDRASIL_IMPLEMENTATION in exactly one compilation unit before
@@ -905,6 +1025,16 @@ static bool checkDeviceExtensionSupport(const char** ppDeviceExtensions,
     VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL,
                                                   &n, pAvailable));
 
+    YG_DEBUG("Requesting device extensions (%d):", deviceExtensionCount);
+    for (uint32_t i = 0; i < deviceExtensionCount; i++) {
+        YG_DEBUG(" * %s", ppDeviceExtensions[i]);
+    }
+
+    YG_DEBUG("Available device extensions (%d):", n);
+    for (uint32_t i = 0; i < n; i++) {
+        YG_DEBUG(" * %s", pAvailable[i].extensionName);
+    }
+
     bool result = true;
     for (uint32_t i = 0; i < deviceExtensionCount; i++) {
         bool found = false;
@@ -940,7 +1070,29 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
         YG_ERROR("No Vulkan queue family available");
     }
 
-    YG_DEBUG("Available queue families for selected device: %d", n);
+    struct VulkanQueue {
+        VkQueueFlagBits flagBit;
+        const char* string;
+    } vulkanQueues[] = {
+        {VK_QUEUE_GRAPHICS_BIT, "VK_QUEUE_GRAPHICS_BIT"},
+        {VK_QUEUE_COMPUTE_BIT, "VK_QUEUE_COMPUTE_BIT"},
+        {VK_QUEUE_TRANSFER_BIT, "VK_QUEUE_TRANSFER_BIT"},
+        {VK_QUEUE_SPARSE_BINDING_BIT, "VK_QUEUE_SPARSE_BINDING_BIT"},
+        {VK_QUEUE_PROTECTED_BIT, "VK_QUEUE_PROTECTED_BIT"},
+        {VK_QUEUE_VIDEO_DECODE_BIT_KHR, "VK_QUEUE_VIDEO_DECODE_BIT_KHR"},
+        {VK_QUEUE_VIDEO_ENCODE_BIT_KHR, "VK_QUEUE_VIDEO_ENCODE_BIT_KHR"},
+        {VK_QUEUE_OPTICAL_FLOW_BIT_NV, "VK_QUEUE_OPTICAL_FLOW_BIT_NV"},
+    };
+
+    YG_DEBUG("Available queue families for selected device (%d):", n);
+    for (uint32_t i = 0; i < n; i++) {
+        YG_DEBUG(" * [%d]:", i);
+        for (uint32_t j = 0; j < YG_ARRAY_LEN(vulkanQueues); j++) {
+            if (pProps[i].queueFlags & vulkanQueues[j].flagBit) {
+                YG_DEBUG("         %s", vulkanQueues[j].string);
+            }
+        }
+    }
 
     uint32_t index = 0;
     for (uint32_t i = 0; i < n; i++) {
@@ -1018,7 +1170,7 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
             ygDevice.properties.rayTracingPipeline = rtp;
         }
 
-        YG_INFO(" * %s, driver: %s %s, Vulkan %d.%d.%d %s",
+        YG_INFO(" * [%d] %s, driver: %s %s, Vulkan %d.%d.%d %s", i,
                 prop.properties.deviceName, driver.driverName,
                 driver.driverInfo,
                 VK_API_VERSION_MAJOR(prop.properties.apiVersion),
@@ -1028,6 +1180,8 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
     }
 
     YG_FREE(pPhysicalDevices);
+
+    checkDeviceExtensionSupport(ppDeviceExtensions, deviceExtensionCount);
 
     uint32_t queueFamilyIndex = getQueueFamilyIndex(
         surface,
@@ -1468,7 +1622,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                    VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    ygSwapchain.images[ygSwapchain.imageIndex], NULL);
 
@@ -2092,8 +2246,8 @@ void ygDestroyPass(YgPass* pPass)
 }
 
 void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
-                    uint32_t colorAttachmentCount, YgImage* pResolveAttachment,
-                    YgImage* pDepthAttachment)
+                    uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+                    YgImage* pResolveAttachment)
 {
     YG_FREE(pPass->pRenderingAttachmentInfos);
     YG_FREE(pPass->pFormats);
@@ -2145,6 +2299,7 @@ void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd)
 {
     vkCmdEndRendering(cmd);
 }
+
 
 #endif
 
