@@ -261,6 +261,9 @@ int main()
                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                    &modelBuffer);
+    float angle = 0.0f;
+    mat4* model = modelBuffer.pHostMap;
+    *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
     YgTexture texture;
     ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_SRGB,
@@ -276,7 +279,17 @@ int main()
     YgBuffer indexBuffer;
     createVertexAndIndexBuffers(&vertexBuffer, &indexBuffer);
 
+    // Seconds since last game loop
+    float delta = 0.0f;
     while (!glfwWindowShouldClose(pWindow)) {
+        delta = (float)glfwGetTime();
+        glfwSetTime(0.0);
+
+        // Rotate model
+        angle += delta;
+        *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
+
+        // Check if swapchain has been recreated
         if (ygSwapchain.recreated) {
             ygDestroyImage(&colorAttachment);
             ygDestroyImage(&depthAttachment);
