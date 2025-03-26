@@ -3,7 +3,5 @@ target_sources(hello_triangle PRIVATE
     "hello_triangle.c"
 )
 
-add_custom_target(hello_triangle_shader ALL
-    COMMENT "Compiling shaders"
-    COMMAND slangc ${CMAKE_CURRENT_SOURCE_DIR}/shader.slang -target spirv -o ${CMAKE_CURRENT_BINARY_DIR}/shader.spv
-)
+configure_file("shader.vert" "${CMAKE_BINARY_DIR}/examples/hello_triangle/shader.vert" COPYONLY)
+configure_file("shader.frag" "${CMAKE_BINARY_DIR}/examples/hello_triangle/shader.frag" COPYONLY)

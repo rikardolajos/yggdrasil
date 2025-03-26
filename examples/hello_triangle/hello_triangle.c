@@ -5,15 +5,23 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#include <GLFW/glfw3.h>
+#include "vecmat.h"
 
+#include <GLFW/glfw3.h>
 
 GLFWwindow* pWindow;
 
-//
-uint8_t shaderModule[] = {0xff};
+typedef struct {
+    mat4 view;
+    mat4 proj;
+} CameraMatrices;
 
-void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
+typedef struct {
+    vec3 position;
+    vec2 textureCoord;
+} Vertex;
+
+static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 {
     *pWidth = 0;
     *pHeight = 0;
@@ -25,7 +33,7 @@ void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
     } while (pWidth == 0 || pHeight == 0);
 }
 
-void createWindow()
+static void createWindow()
 {
     if (!glfwInit()) {
         YG_ERROR("Failed to initialize GLFW");
@@ -43,17 +51,17 @@ void createWindow()
     glfwMakeContextCurrent(pWindow);
 }
 
-void createInstance()
+static void createInstance()
 {
     uint32_t instanceExtensionCount;
     const char** ppInstanceExtensions =
         glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
 
-    ygCreateInstance(VK_API_VERSION_1_3, ppInstanceExtensions,
-                     instanceExtensionCount);
+    ygCreateInstance(VK_API_VERSION_1_3, instanceExtensionCount,
+                     ppInstanceExtensions);
 }
 
-void createDevice(VkSurfaceKHR surface)
+static void createDevice(VkSurfaceKHR surface)
 {
     const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
@@ -81,11 +89,12 @@ void createDevice(VkSurfaceKHR surface)
         .pNext = &vk14Features,
     };
 
-    ygCreateDevice(0, deviceExtensions, YG_ARRAY_LEN(deviceExtensions),
+    ygCreateDevice(0, YG_ARRAY_LEN(deviceExtensions), deviceExtensions,
                    &features, surface);
 }
 
-void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment)
+static void createAttachments(YgImage* pColorAttachment,
+                              YgImage* pDepthAttachment)
 {
     ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
                   VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
@@ -122,13 +131,79 @@ void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment)
     ygCmdEnd(cmd);
 }
 
-void cleanUp()
+static void createLayout(YgLayout* pLayout)
 {
-    ygDestroySwapchain();
-    ygDestroyDevice();
-    ygDestroyInstance();
+    VkDescriptorType types[] = {
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    };
 
-    glfwTerminate();
+    VkShaderStageFlags stages[] = {
+        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+
+    uint32_t counts[] = {1, 1, 1};
+
+    ygCreateLayout(YG_ARRAY_LEN(types), types, stages, counts, 0, NULL,
+                   pLayout);
+}
+
+static void createVertexAndIndexBuffers(YgBuffer* pVertexBuffer,
+                                        YgBuffer* pIndexBuffer)
+{
+    Vertex vertices[] = {
+        {.position = {-1.0f, -1.0f, 0.0f}, .textureCoord = {0.0f, 0.0f}},
+        {.position = {1.0f, -1.0f, 0.0f}, .textureCoord = {1.0f, 0.0f}},
+        {.position = {-1.0f, 1.0f, 0.0f}, .textureCoord = {0.0f, 1.0f}},
+        {.position = {1.0f, 1.0f, 0.0f}, .textureCoord = {1.0f, 1.0f}},
+    };
+    uint32_t indices[] = {0, 1, 3, 0, 3, 2};
+
+    size_t verticesSize = YG_ARRAY_LEN(vertices) * sizeof(Vertex);
+    size_t indicesSize = YG_ARRAY_LEN(indices) * sizeof(uint32_t);
+
+    ygCreateBuffer(verticesSize,
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pVertexBuffer);
+    ygCreateBuffer(indicesSize,
+                   VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pVertexBuffer);
+}
+
+static void cmdSetRenderingStates(VkCommandBuffer cmd)
+{
+    const VkVertexInputBindingDescription2EXT vertexBindingDescription[] = {{
+        .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+        .binding = 0,
+        .stride = sizeof(Vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    }};
+
+    const VkVertexInputAttributeDescription2EXT vertexAttributeDescription[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(Vertex, position),
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+            .location = 0,
+            .binding = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(Vertex, textureCoord),
+        },
+    };
+
+    ygCmdSetDefaultStates(
+        cmd, YG_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
+        YG_ARRAY_LEN(vertexAttributeDescription), vertexAttributeDescription);
 }
 
 int main()
@@ -143,51 +218,130 @@ int main()
 
     createDevice(surface);
 
-    ygCreateSwapchain(2, framebufferSizeCallback);
+    ygCreateSwapchain(1, framebufferSizeCallback);
 
     YgImage colorAttachment;
     YgImage depthAttachment;
     createAttachments(&colorAttachment, &depthAttachment);
 
     YgPass pass;
-    ygCreatePass(&colorAttachment, 1, &depthAttachment, NULL, &pass);
+    ygCreatePass(1, &colorAttachment, &depthAttachment, NULL, &pass);
+
+    YgLayout layout;
+    createLayout(&layout);
+
+    YgShader vertexShader;
+    YgShader fragmentShader;
+    ygCreateShaderFromFileGLSL("shader.vert", VK_SHADER_STAGE_VERTEX_BIT,
+                               VK_SHADER_STAGE_FRAGMENT_BIT, &layout,
+                               &vertexShader);
+    ygCreateShaderFromFileGLSL("shader.frag", VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               &layout, &vertexShader);
+    ygBuildLinkedShaders(&vertexShader, &fragmentShader);
+
+    YgBuffer cameraBuffer;
+    ygCreateBuffer(sizeof(CameraMatrices), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                   &cameraBuffer);
+
+    CameraMatrices cameraMatrices = {
+        .view = mat4_lookat((vec3){0.0f, 0.0f, -5.0f}, (vec3){0.0f, 0.0f, 0.0f},
+                            (vec3){0.0f, 1.0f, 0.0f}),
+        .proj =
+            mat4_perspective(ygSwapchain.extent.width,
+                             ygSwapchain.extent.height, 0.01f, 100.0f, 60.0f),
+    };
+
+    ygCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices),
+                         0);
+
+    YgBuffer modelBuffer;
+    ygCreateBuffer(sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                   &modelBuffer);
+
+    YgTexture texture;
+    ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_SRGB,
+                            "texture.png", false, &texture);
+    YgSampler sampler;
+    ygCreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
+                    VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, &sampler);
+
+    YgBuffer vertexBuffer;
+    YgBuffer indexBuffer;
+    createVertexAndIndexBuffers(&vertexBuffer, &indexBuffer);
 
     while (!glfwWindowShouldClose(pWindow)) {
         if (ygSwapchain.recreated) {
             ygDestroyImage(&colorAttachment);
             ygDestroyImage(&depthAttachment);
             createAttachments(&colorAttachment, &depthAttachment);
-            ygRecreatePass(&pass, &colorAttachment, 1, &depthAttachment, NULL);
+            ygRecreatePass(&pass, 1, &colorAttachment, &depthAttachment, NULL);
         }
 
+        // Start new frame
         VkCommandBuffer cmd = ygAcquireNextImage();
-
         ygTransitionForColorAttachment(cmd, &colorAttachment);
-
-        ygBeginPass(
-            &pass, cmd,
+        ygCmdBeginPass(
+            cmd, &pass,
             (VkClearValue){.color = {{0.0f, 0.0f, 0.0f, 0.0f}},
                            .depthStencil = {.depth = 1.0f, .stencil = 0}},
             VK_ATTACHMENT_LOAD_OP_CLEAR);
 
+        // Set rendering states
+        cmdSetRenderingStates(cmd);
 
         // Push descriptor
+        VkWriteDescriptorSet writes[] = {
+            ygGetBufferDescriptor(&cameraBuffer, 0, 0, VK_WHOLE_SIZE),
+            ygGetBufferDescriptor(&modelBuffer, 0, 0, VK_WHOLE_SIZE),
+            ygGetTextureDescriptor(&texture, 2),
+        };
+        vkCmdPushDescriptorSet(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                               layout.pipelineLayout, 0, YG_ARRAY_LEN(writes),
+                               writes);
+
+        // Bind shaders
+        ygCmdBindShader(cmd, &vertexShader);
+        ygCmdBindShader(cmd, &fragmentShader);
 
         // Draw
 
-        ygEndPass(&pass, cmd);
-
+        // End and present frame
+        ygCmdEndPass(cmd, &pass);
         ygTransitionForBlitting(cmd, &colorAttachment);
-
         ygPresent(cmd, &colorAttachment);
 
         glfwPollEvents();
     }
+
+    ygDestroyBuffer(&vertexBuffer);
+    ygDestroyBuffer(&indexBuffer);
+
+    ygDestroySampler(&sampler);
+    ygDestroyTexture(&texture);
+
+    ygDestroyBuffer(&cameraBuffer);
+    ygDestroyBuffer(&modelBuffer);
+
+    ygDestroyShader(&vertexShader);
+    ygDestroyShader(&fragmentShader);
+
+    ygDestroyLayout(&layout);
 
     ygDestroyImage(&colorAttachment);
     ygDestroyImage(&depthAttachment);
 
     ygDestroyPass(&pass);
 
-    cleanUp();
+    ygDestroySwapchain();
+    ygDestroyDevice();
+    ygDestroyInstance();
+
+    glfwTerminate();
 }

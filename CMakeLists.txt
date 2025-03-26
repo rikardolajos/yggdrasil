@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.24)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -18,6 +18,13 @@ project("Yggdrasil" VERSION 0.0.1)
 find_package(Vulkan REQUIRED)
 include_directories(${Vulkan_INCLUDE_DIRS})
 link_libraries(${Vulkan_LIBRARIES})
+
+set(VULKAN_SDK_ROOT $ENV{VULKAN_SDK})
+find_library(GLSLANG_LIB glslang HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(SPIRV_LIB SPIRV-Tools HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(SPIRV_OPT_LIB SPIRV-Tools-opt HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB glslang-default-resource-limits HINTS "${VULKAN_SDK_ROOT}/lib")
+link_libraries(${GLSLANG_LIB} ${SPIRV_LIB} ${SPIRV_OPT_LIB} ${GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB})
 
 add_subdirectory(submodules)
 include_directories(submodules/glfw/include)

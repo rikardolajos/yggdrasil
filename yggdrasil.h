@@ -44,6 +44,9 @@ extern "C" {
 
 #include <vulkan/vulkan.h>
 
+#include <glslang/Include/glslang_c_interface.h>
+#include <glslang/Public/resource_limits_c.h>
+
 // Define YGGDRASIL_STBI if stb_image.h is available. This allows for texture
 // loading from file.
 #ifdef YGGDRASIL_STBI
@@ -212,6 +215,7 @@ typedef struct YgDevice {
     VkDebugUtilsMessengerEXT debugMessenger;
 #endif
     uint32_t queueFamilyIndex;
+    uint32_t apiVersion;
     bool vsync;
 } YgDevice;
 
@@ -232,10 +236,10 @@ typedef struct YgSwapchain {
 
     struct SupportDetails {
         VkSurfaceCapabilitiesKHR capabilities;
-        VkSurfaceFormatKHR* formats;
-        VkPresentModeKHR* presentModes;
         uint32_t formatCount;
+        VkSurfaceFormatKHR* formats;
         uint32_t presentCount;
+        VkPresentModeKHR* presentModes;
     } supportDetails;
 
     VkImage* images;
@@ -320,11 +324,35 @@ typedef struct YgPass {
     VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo;
     VkRenderingAttachmentInfo* pRenderingAttachmentInfos;
     VkFormat* pFormats;
-    YgImage* pColorAttachments;
     uint32_t colorAttachmentCount;
+    YgImage* pColorAttachments;
     YgImage* pDepthAttachment;
     YgImage* pResolveAttachment;
 } YgPass;
+
+// Layout abstracts the use of descriptor set layouts and pipeline layouts.
+// Create a new layout with ygCreateLayout(). Only one descriptor set is
+// supported and it is a push descriptor. Release resources with
+// ygDestroyLayout().
+typedef struct YgLayout {
+    VkDescriptorSetLayout setLayout;
+    uint32_t pushConstantRangeCount;
+    VkPushConstantRange* pPushConstantRanges;
+    VkPipelineLayout pipelineLayout;
+} YgLayout;
+
+// Shader abstracts the handling of shaders and builds ontop of Vulkans shader
+// objects. Create a new shader from SPIR-V code with ygCreateShader(). To load
+// a shader from GLSL source code, use ygCreateShaderFromFileGLSL(). Before
+// using the shader, the shader has to be build. Either use ygBuildShader(), or
+// use ygBuildLinkedShaders() to build an optimized vertex-fragment shader pair.
+// For rendering, the active shader has to be bound: use ygCmdBindShader().
+// Release resources with ygDestroyShader().
+typedef struct YgShader {
+    VkShaderEXT shader;
+    VkShaderCreateInfoEXT createInfo;
+    char* pPath;
+} YgShader;
 
 
 // Monolithic global variables //
@@ -340,11 +368,11 @@ extern YgSwapchain ygSwapchain;
 /// ygDevice.
 /// </summary>
 /// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or
-/// VK_MAKE_API_VERSION()</param> <param name="ppInstanceExtensions">List of
-/// instance extensions to use</param> <param
-/// name="instanceExtensionCount">Number of instance extensions</param>
-void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
-                      uint32_t instanceExtensionCount);
+/// VK_MAKE_API_VERSION()</param> <param name="instanceExtensionCount">Number of
+/// instance extensions</param> <param name="ppInstanceExtensions">List of
+/// instance extensions to use</param>
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
+                      const char** ppInstanceExtensions);
 
 /// <summary>
 /// Release resources for the instance.
@@ -356,14 +384,13 @@ void ygDestroyInstance();
 /// ygDevice.
 /// </summary>
 /// <param name="physicalDeviceIndex">Physical device index to use</param>
-/// <param name="ppDeviceExtensions">List of device extensions to use</param>
 /// <param name="deviceExtensionCount">Number of device extensions</param>
+/// <param name="ppDeviceExtensions">List of device extensions to use</param>
 /// <param name="features">Pointer to features that will be put in pNext of
 /// VkDeviceCreateInfo, can be NULL</param> <param name="surface">Surface to
 /// use</param>
-void ygCreateDevice(uint32_t physicalDeviceIndex,
+void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
                     const char** ppDeviceExtensions,
-                    uint32_t deviceExtensionCount,
                     VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface);
 
 /// <summary>
@@ -559,18 +586,18 @@ VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
 /// <summary>
 /// Create a new pass.
 /// </summary>
+/// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color
-/// attachments</param> <param name="colorAttachmentCount">Number of color
 /// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
 /// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
 /// use, can be NULL</param> <param name="pPass">Where the created pass will be
 /// stored</param>
-void ygCreatePass(YgImage* pColorAttachments, uint32_t colorAttachmentCount,
+void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments,
                   YgImage* pDepthAttachment, YgImage* pResolveAttachment,
                   YgPass* pPass);
 
 /// <summary>
-/// Release resource for a pass
+/// Release resource for a pass.
 /// </summary>
 /// <param name="pPass">Pass to destroy</param>
 void ygDestroyPass(YgPass* pPass);
@@ -580,32 +607,120 @@ void ygDestroyPass(YgPass* pPass);
 /// followed by ygCreatePass().
 /// </summary>
 /// <param name="pPass">Pass to recreate</param>
+/// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color
-/// attachments</param> <param name="colorAttachmentCount">Number of color
 /// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
 /// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
 /// use, can be NULL</param>
-void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
-                    uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount,
+                    YgImage* pColorAttachments, YgImage* pDepthAttachment,
                     YgImage* pResolveAttachment);
 
 /// <summary>
 /// Begin dynamic rendering using a pass.
 /// </summary>
-/// <param name="pPass">Pass to use</param>
 /// <param name="cmd">Command buffer to use</param>
+/// <param name="pPass">Pass to use</param>
 /// <param name="clearValue">Clear value for attachments</param>
 /// <param name="loadOp">Load operation for attachments</param>
-void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
-                 VkClearValue clearValue, VkAttachmentLoadOp loadOp);
+void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
+                    VkClearValue clearValue, VkAttachmentLoadOp loadOp);
 
 /// <summary>
 /// End dynamic rendering using a pass.
 /// </summary>
-/// <param name="pPass">Pass to use</param>
 /// <param name="cmd">Command buffer to use</param>
-void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd);
+/// <param name="pPass">Pass to use</param>
+void ygCmdEndPass(VkCommandBuffer cmd, const YgPass* pPass);
 
+/// <summary>
+/// Create a new layout.
+/// </summary>
+/// <param name="bindingCount">Number of bindings</param>
+/// <param name="pTypes">List of descriptor types, one per binding</param>
+/// <param name="pStages">List of shader stages, one per binding</param>
+/// <param name="pCounts">List of descriptor counts, one per binding</param>
+/// <param name="pushConstantRangeCount">Number of push constant ranges</param>
+/// <param name="pPushConstantRanges">List of push constant ranges</param>
+/// <param name="pLayout">Where the created layout will be stored</param>
+void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
+                    VkShaderStageFlags* pStages, uint32_t* pCounts,
+                    uint32_t pushConstantRangeCount,
+                    VkPushConstantRange* pPushConstantRanges,
+                    YgLayout* pLayout);
+
+/// <summary>
+/// Release resources for a layout.
+/// </summary>
+/// <param name="pLayout">Layout to destroy</param>
+void ygDestroyLayout(YgLayout* pLayout);
+
+/// <summary>
+/// Create a new shader from SPIR-V byte code.
+/// </summary>
+/// <param name="pCode">Pointer to SPIR-V byte code</param>
+/// <param name="codeSize">Size of code in bytes</param>
+/// <param name="stage">Which stage the shader represents</param>
+/// <param name="nextStage">Which stages can come after this shader</param>
+/// <param name="pLayout">Layout to use</param>
+/// <param name="pShader">Where the created shader will be stored</param>
+void ygCreateShader(const void* pCode, size_t codeSize,
+                    VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
+                    const YgLayout* pLayout, YgShader* pShader);
+
+/// <summary>
+/// Create a new shader from GLSL source code.
+/// </summary>
+/// <param name="pPath">Path to GLSL source code</param>
+/// <param name="stage">Which stage the shader represents</param>
+/// <param name="nextStage">Which stages can come after this shader</param>
+/// <param name="pLayout">Layout to use</param>
+/// <param name="pShader">Where the created shader will be stored</param>
+void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
+                                VkShaderStageFlags nextStage,
+                                const YgLayout* pLayout, YgShader* pShader);
+
+/// <summary>
+/// Release resources for a shader.
+/// </summary>
+/// <param name="pShader">Shader to destroy</param>
+void ygDestroyShader(YgShader* pShader);
+
+/// <summary>
+/// Build a shader.
+/// </summary>
+/// <param name="pShader">Shader to build</param>
+void ygBuildShader(YgShader* pShader);
+
+/// <summary>
+/// Build a linked vertex and fragment shader.
+/// </summary>
+/// <param name="pVertexShader">Vertex shader to build</param>
+/// <param name="pFragmentShader">Fragment shader to build</param>
+void ygBuildLinkedShaders(YgShader* pVertexShader, YgShader* pFragmentShader);
+
+/// <summary>
+/// Bind a shader for rendering.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pShader">Shader to bind</param>
+void ygCmdBindShader(VkCommandBuffer cmd, const YgShader* pShader);
+
+/// <summary>
+/// Set default states for rendering using shader objects.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="vertexBindingDescriptionCount">Number of vertex binding
+/// descriptions</param> <param name="vertexBindingDescriptions">List of vertex
+/// binding descriptions</param> <param
+/// name="vertexAttributeDescriptionCount">Number of vertex attribute
+/// descriptions</param> <param name="vertexAttributeDescriptions">List of
+/// vertex attrubyte descriptions</param>
+void ygCmdSetDefaultStates(
+    VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+    const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+    uint32_t vertexAttributeDescriptionCount,
+    const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
 
 // Inlined helper functions //
 
@@ -873,6 +988,9 @@ static YgSwapchain ygSwapchain;
 // Clamp a value to an interval
 #define YG_CLAMP(x, low, high) (YG_MIN(YG_MAX((x), (low)), (high)))
 
+// Explicitly mark a variable as unused
+#define YG_UNUSED(x) (void)(x)
+
 // Macro for loading a device function pointers as Xvk...()
 #define VK_LOAD(func_name)                                                     \
     PFN_##func_name X##func_name =                                             \
@@ -958,9 +1076,11 @@ static void createDebugMessenger()
 }
 #endif
 
-void ygCreateInstance(uint32_t apiVersion, const char** ppInstanceExtensions,
-                      uint32_t instanceExtensionCount)
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
+                      const char** ppInstanceExtensions)
 {
+    ygDevice.apiVersion = apiVersion;
+
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pEngineName = "Yggdrasil",
@@ -1015,8 +1135,8 @@ void ygDestroyInstance()
     }
 }
 
-static bool checkDeviceExtensionSupport(const char** ppDeviceExtensions,
-                                        uint32_t deviceExtensionCount)
+static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount,
+                                        const char** ppDeviceExtensions)
 {
     uint32_t n;
     VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL,
@@ -1119,9 +1239,8 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
     return index;
 }
 
-void ygCreateDevice(uint32_t physicalDeviceIndex,
+void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
                     const char** ppDeviceExtensions,
-                    uint32_t deviceExtensionCount,
                     VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface)
 {
     if (!ygDevice.instance) {
@@ -1181,7 +1300,7 @@ void ygCreateDevice(uint32_t physicalDeviceIndex,
 
     YG_FREE(pPhysicalDevices);
 
-    checkDeviceExtensionSupport(ppDeviceExtensions, deviceExtensionCount);
+    checkDeviceExtensionSupport(deviceExtensionCount, ppDeviceExtensions);
 
     uint32_t queueFamilyIndex = getQueueFamilyIndex(
         surface,
@@ -1300,8 +1419,8 @@ static void querySupport()
 // want. If what we want is not available, the first format in the array is
 // returned.
 static VkSurfaceFormatKHR
-chooseSurfaceFormat(const VkSurfaceFormatKHR* availableFormats,
-                    uint32_t availableFormatsCount)
+chooseSurfaceFormat(uint32_t availableFormatsCount,
+                    const VkSurfaceFormatKHR* availableFormats)
 {
     for (uint32_t i = 0; i < availableFormatsCount; i++) {
         if (availableFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
@@ -1317,8 +1436,8 @@ chooseSurfaceFormat(const VkSurfaceFormatKHR* availableFormats,
 // available, otherwise go for VK_PRESENT_MODE_FIFO_KHR. If vsync is requested,
 // just go for VK_PRESENT_MODE_FIFO_KHR.
 static VkPresentModeKHR
-choosePresentMode(const VkPresentModeKHR* availablePresentModes,
-                  uint32_t availablePresentModeCount, bool vsync)
+choosePresentMode(uint32_t availablePresentModeCount,
+                  const VkPresentModeKHR* availablePresentModes, bool vsync)
 {
     if (vsync) {
         return VK_PRESENT_MODE_FIFO_KHR;
@@ -1364,11 +1483,11 @@ static void createSwapchain()
     ygSwapchain.framebufferSizeCallback(&width, &height);
 
     VkSurfaceFormatKHR surfaceFormat =
-        chooseSurfaceFormat(ygSwapchain.supportDetails.formats,
-                            ygSwapchain.supportDetails.formatCount);
+        chooseSurfaceFormat(ygSwapchain.supportDetails.formatCount,
+                            ygSwapchain.supportDetails.formats);
     VkPresentModeKHR presentMode = choosePresentMode(
-        ygSwapchain.supportDetails.presentModes,
-        ygSwapchain.supportDetails.presentCount, ygDevice.vsync);
+        ygSwapchain.supportDetails.presentCount,
+        ygSwapchain.supportDetails.presentModes, ygDevice.vsync);
     VkExtent2D extent =
         chooseExtent(&ygSwapchain.supportDetails.capabilities, width, height);
 
@@ -2188,8 +2307,8 @@ VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
     };
 }
 
-static createPass(YgPass* pPass, YgImage* pColorAttachments,
-                  uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+static createPass(YgPass* pPass, uint32_t colorAttachmentCount,
+                  YgImage* pColorAttachments, YgImage* pDepthAttachment,
                   YgImage* pResolveAttachment)
 {
     *pPass = (YgPass){
@@ -2229,11 +2348,11 @@ static createPass(YgPass* pPass, YgImage* pColorAttachments,
     };
 }
 
-void ygCreatePass(YgImage* pColorAttachments, uint32_t colorAttachmentCount,
+void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments,
                   YgImage* pDepthAttachment, YgImage* pResolveAttachment,
                   YgPass* pPass)
 {
-    createPass(pPass, pColorAttachments, colorAttachmentCount, pDepthAttachment,
+    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment,
                pResolveAttachment);
 }
 
@@ -2245,18 +2364,18 @@ void ygDestroyPass(YgPass* pPass)
     YG_RESET(pPass);
 }
 
-void ygRecreatePass(YgPass* pPass, YgImage* pColorAttachments,
-                    uint32_t colorAttachmentCount, YgImage* pDepthAttachment,
+void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount,
+                    YgImage* pColorAttachments, YgImage* pDepthAttachment,
                     YgImage* pResolveAttachment)
 {
     YG_FREE(pPass->pRenderingAttachmentInfos);
     YG_FREE(pPass->pFormats);
-    createPass(pPass, pColorAttachments, colorAttachmentCount, pDepthAttachment,
+    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment,
                pResolveAttachment);
 }
 
-void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
-                 VkClearValue clearValue, VkAttachmentLoadOp loadOp)
+void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
+                    VkClearValue clearValue, VkAttachmentLoadOp loadOp)
 {
     for (uint32_t i = 0; i < pPass->colorAttachmentCount; i++) {
         pPass->pRenderingAttachmentInfos[i].clearValue = clearValue;
@@ -2295,11 +2414,318 @@ void ygBeginPass(const YgPass* pPass, VkCommandBuffer cmd,
     vkCmdBeginRendering(cmd, &renderingInfo);
 }
 
-void ygEndPass(const YgPass* pPass, VkCommandBuffer cmd)
+void ygCmdEndPass(VkCommandBuffer cmd, const YgPass* pPass)
 {
+    YG_UNUSED(pPass);
     vkCmdEndRendering(cmd);
 }
 
+void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
+                    VkShaderStageFlags* pStages, uint32_t* pCounts,
+                    uint32_t pushConstantRangeCount,
+                    VkPushConstantRange* pPushConstantRanges, YgLayout* pLayout)
+{
+    if (!ygDevice.device) {
+        YG_ERROR("Device not initialized");
+    }
+
+    size_t pushConstantRangeSize =
+        pushConstantRangeCount * sizeof(VkPushConstantRange);
+
+    *pLayout = (YgLayout){
+        .pPushConstantRanges = YG_MALLOC(pushConstantRangeSize),
+        .pushConstantRangeCount = pushConstantRangeCount,
+    };
+
+    memcpy(pLayout->pPushConstantRanges, pPushConstantRanges,
+           pushConstantRangeSize);
+
+    VkDescriptorSetLayoutBinding* pBindings =
+        YG_MALLOC(bindingCount * sizeof *pBindings);
+
+    for (uint32_t i = 0; i < bindingCount; i++) {
+        pBindings[i] = (VkDescriptorSetLayoutBinding){
+            .binding = 0,
+            .descriptorType = pTypes[i],
+            .descriptorCount = pCounts[i],
+            .stageFlags = pStages[i],
+        };
+    }
+
+    VkDescriptorSetLayoutCreateInfo setLayoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT,
+        .bindingCount = bindingCount,
+        .pBindings = pBindings,
+    };
+
+    VK_CHECK(vkCreateDescriptorSetLayout(ygDevice.device, &setLayoutCreateInfo,
+                                         NULL, &pLayout->setLayout));
+
+    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = 1,
+        .pSetLayouts = &pLayout->setLayout,
+        .pushConstantRangeCount = pLayout->pushConstantRangeCount,
+        .pPushConstantRanges = pLayout->pPushConstantRanges,
+    };
+    VK_CHECK(vkCreatePipelineLayout(ygDevice.device, &pipelineLayoutCreateInfo,
+                                    NULL, &pLayout->pipelineLayout));
+
+    YG_FREE(pBindings);
+}
+
+void ygDestroyLayout(YgLayout* pLayout)
+{
+    vkDeviceWaitIdle(ygDevice.device);
+
+    vkDestroyPipelineLayout(ygDevice.device, pLayout->pipelineLayout, NULL);
+    vkDestroyDescriptorSetLayout(ygDevice.device, pLayout->setLayout, NULL);
+
+    YG_FREE(pLayout->pPushConstantRanges);
+
+    YG_RESET(pLayout);
+}
+
+void createShader(YgShader* pShader, const void* pCode, size_t codeSize,
+                  VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
+                  const YgLayout* pLayout)
+{
+    if (!ygDevice.device) {
+        YG_ERROR("Device not initialized");
+    }
+
+    pShader->createInfo = (VkShaderCreateInfoEXT){
+        .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+        .flags = 0,
+        .stage = stage,
+        .nextStage = nextStage,
+        .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+        .codeSize = codeSize,
+        .pCode = pCode,
+        .pName = "main",
+        .setLayoutCount = 1,
+        .pSetLayouts = &pLayout->setLayout,
+        .pushConstantRangeCount = pLayout->pushConstantRangeCount,
+        .pPushConstantRanges = pLayout->pPushConstantRanges,
+        .pSpecializationInfo = NULL,
+    };
+}
+
+void ygCreateShader(const void* pCode, size_t codeSize,
+                    VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
+                    const YgLayout* pLayout, YgShader* pShader)
+{
+    createShader(pShader, pCode, codeSize, stage, nextStage, pLayout);
+}
+
+void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
+                                VkShaderStageFlags nextStage,
+                                const YgLayout* pLayout, YgShader* pShader)
+{
+    size_t sz = strlen(pPath) + 1;
+
+    *pShader = (YgShader){
+        .pPath = YG_MALLOC(sz),
+    };
+
+    memset(pShader->pPath, 0, sz);
+    strcpy_s(pShader->pPath, sz, pPath);
+
+    // Read file
+    FILE* file = fopen(pShader->pPath, "rb");
+    if (!file) {
+        YG_ERROR("Unable to open %s\n", pShader->pPath);
+    }
+
+    long file_size;
+    fseek(file, 0, SEEK_END);
+    file_size = ftell(file);
+    rewind(file);
+
+    char* pShaderSource = YG_MALLOC(file_size);
+    fread(pShaderSource, 1, file_size, file);
+
+    fclose(file);
+
+    // Compile GLSL to SPIR-V
+    glslang_target_client_version_t targetVersion = GLSLANG_TARGET_VULKAN_1_0;
+    switch (VK_VERSION_MAJOR(ygDevice.apiVersion)) {
+    case 1:
+        switch (VK_VERSION_MINOR(ygDevice.apiVersion)) {
+        case 0:
+            targetVersion = GLSLANG_TARGET_VULKAN_1_0;
+            break;
+        case 1:
+            targetVersion = GLSLANG_TARGET_VULKAN_1_1;
+            break;
+        case 2:
+            targetVersion = GLSLANG_TARGET_VULKAN_1_2;
+            break;
+        case 3:
+            targetVersion = GLSLANG_TARGET_VULKAN_1_3;
+            break;
+        case 4:
+            targetVersion = GLSLANG_TARGET_VULKAN_1_4;
+            break;
+        }
+        break;
+    }
+
+    const glslang_input_t input = {
+        .language = GLSLANG_SOURCE_GLSL,
+        .stage = stage,
+        .client = GLSLANG_CLIENT_VULKAN,
+        .client_version = targetVersion,
+        .target_language = GLSLANG_TARGET_SPV,
+        .target_language_version = GLSLANG_TARGET_SPV_1_6,
+        .code = pShaderSource,
+        .default_version = 100,
+        .default_profile = GLSLANG_NO_PROFILE,
+        .force_default_version_and_profile = false,
+        .forward_compatible = false,
+        .messages = GLSLANG_MSG_DEFAULT_BIT,
+        .resource = glslang_default_resource(),
+    };
+
+    glslang_shader_t* shader = glslang_shader_create(&input);
+
+    if (!glslang_shader_preprocess(shader, &input)) {
+        YG_ERROR("GLSL preprocessing failed %s\n%s\n%s", pPath,
+                 glslang_shader_get_info_log(shader),
+                 glslang_shader_get_info_debug_log(shader));
+    }
+
+    if (!glslang_shader_parse(shader, &input)) {
+        YG_ERROR("GLSL parsing failed %s\n%s\n%s", pPath,
+                 glslang_shader_get_info_log(shader),
+                 glslang_shader_get_info_debug_log(shader));
+    }
+
+    glslang_program_t* program = glslang_program_create();
+    glslang_program_add_shader(program, shader);
+
+    if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT |
+                                           GLSLANG_MSG_VULKAN_RULES_BIT)) {
+        YG_ERROR("GLSL linking failed %s\n%s\n%s", pPath,
+                 glslang_program_get_info_log(program),
+                 glslang_program_get_info_debug_log(program));
+    }
+
+    glslang_program_SPIRV_generate(program, stage);
+
+    size_t codeSize = glslang_program_SPIRV_get_size(program);
+    uint32_t* pCode = YG_MALLOC(codeSize * sizeof(uint32_t));
+    glslang_program_SPIRV_get(program, pCode);
+
+    const char* spirvMessages = glslang_program_SPIRV_get_messages(program);
+    if (spirvMessages) {
+        YG_ERROR("(%s) %s", pPath, spirvMessages);
+    }
+
+    glslang_program_delete(program);
+    glslang_shader_delete(shader);
+
+    createShader(pShader, pCode, codeSize, stage, nextStage, pLayout);
+
+    YG_FREE(pCode);
+    YG_FREE(pShaderSource);
+}
+
+void ygDestroyShader(YgShader* pShader)
+{
+    vkDeviceWaitIdle(ygDevice.device);
+
+    VK_LOAD(vkDestroyShaderEXT);
+    XvkDestroyShaderEXT(ygDevice.device, pShader->shader, NULL);
+
+    YG_FREE(pShader->pPath);
+
+    YG_RESET(pShader);
+}
+
+void ygBuildShader(YgShader* pShader)
+{
+    VK_LOAD(vkCreateShadersEXT);
+    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, 1, &pShader->createInfo, NULL,
+                                 &pShader->shader));
+}
+
+void ygBuildLinkedShaders(YgShader* pVertexShader, YgShader* pFragmentShader)
+{
+    if (!pVertexShader || !pFragmentShader) {
+        YG_ERROR("Both pVertexShader and pFragmentShader need to be specified");
+    }
+
+    VkShaderCreateInfoEXT createInfos[] = {
+        pVertexShader->createInfo,
+        pFragmentShader->createInfo,
+    };
+
+    for (uint32_t i = 0; i < YG_ARRAY_LEN(createInfos); i++) {
+        createInfos[i].flags |= VK_SHADER_CREATE_LINK_STAGE_BIT_EXT;
+    }
+
+    VkShaderEXT shaders[YG_ARRAY_LEN(createInfos)];
+
+    VK_LOAD(vkCreateShadersEXT);
+    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, YG_ARRAY_LEN(createInfos),
+                                 createInfos, NULL, shaders));
+
+    pVertexShader->shader = shaders[0];
+    pFragmentShader->shader = shaders[1];
+}
+
+void ygCmdBindShader(VkCommandBuffer cmd, const YgShader* pShader)
+{
+    VK_LOAD(vkCmdBindShadersEXT);
+    XvkCmdBindShadersEXT(cmd, 1, &pShader->createInfo.stage, &pShader->shader);
+}
+
+void ygCmdSetDefaultStates(
+    VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+    const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+    uint32_t vertexAttributeDescriptionCount,
+    const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
+{
+    const VkViewport viewport = {
+        .width = (float)ygSwapchain.extent.width,
+        .height = (float)ygSwapchain.extent.height,
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    const VkRect2D scissor = {.extent = ygSwapchain.extent};
+    vkCmdSetViewportWithCount(cmd, 1, &viewport);
+    vkCmdSetScissorWithCount(cmd, 1, &scissor);
+    vkCmdSetRasterizerDiscardEnable(cmd, VK_FALSE);
+
+    vkCmdSetVertexInputEXT(
+        cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
+        vertexAttributeDescriptionCount, vertexAttributeDescriptions);
+    vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
+
+    const VkSampleMask sampleMask = 0x1;
+    vkCmdSetRasterizationSamplesEXT(cmd, VK_SAMPLE_COUNT_1_BIT);
+    vkCmdSetSampleMaskEXT(cmd, VK_SAMPLE_COUNT_1_BIT, &sampleMask);
+    vkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
+    vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
+    vkCmdSetCullMode(cmd, VK_FALSE);
+    vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+    vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_GREATER);
+    vkCmdSetDepthBoundsTestEnable(cmd, VK_FALSE);
+    vkCmdSetDepthBiasEnable(cmd, VK_FALSE);
+    vkCmdSetStencilTestEnable(cmd, VK_FALSE);
+
+    const VkBool32 colorBlendEnable = VK_FALSE;
+    const VkColorComponentFlags colorComponents =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_B_BIT |
+        VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_A_BIT;
+    vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
+    vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &colorBlendEnable);
+    vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &colorComponents);
+}
 
 #endif
 
