@@ -1,3 +1,9 @@
 [submodule "submodules/glfw"]
 	path = submodules/glfw
 	url = https://github.com/glfw/glfw.git
+[submodule "submodules/vecmat"]
+	path = submodules/vecmat
+	url = https://github.com/rikardolajos/vecmat.git
+[submodule "submodules/stb"]
+	path = submodules/stb
+	url = https://github.com/nothings/stb.git

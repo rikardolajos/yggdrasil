@@ -47,9 +47,9 @@ extern "C" {
 #include <glslang/Include/glslang_c_interface.h>
 #include <glslang/Public/resource_limits_c.h>
 
-// Define YGGDRASIL_STBI if stb_image.h is available. This allows for texture
-// loading from file.
-#ifdef YGGDRASIL_STBI
+// Define YGGDRASIL_USE_STB_IMAGE if stb_image.h is available. This allows for
+// texture loading from file.
+#ifdef YGGDRASIL_USE_STB_IMAGE
 #include "stb_image.h"
 #endif
 
@@ -112,8 +112,7 @@ struct VulkanResult {
     {VK_ERROR_OUT_OF_POOL_MEMORY, "VK_ERROR_OUT_OF_POOL_MEMORY"},
     {VK_ERROR_INVALID_EXTERNAL_HANDLE, "VK_ERROR_INVALID_EXTERNAL_HANDLE"},
     {VK_ERROR_FRAGMENTATION, "VK_ERROR_FRAGMENTATION"},
-    {VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS,
-     "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS"},
+    {VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS, "VK_ERROR_INVALID_OPAQUE_CAPTURE_ADDRESS"},
     {VK_ERROR_SURFACE_LOST_KHR, "VK_ERROR_SURFACE_LOST_KHR"},
     {VK_ERROR_NATIVE_WINDOW_IN_USE_KHR, "VK_ERROR_NATIVE_WINDOW_IN_USE_KHR"},
     {VK_SUBOPTIMAL_KHR, "VK_SUBOPTIMAL_KHR"},
@@ -121,22 +120,18 @@ struct VulkanResult {
     {VK_ERROR_INCOMPATIBLE_DISPLAY_KHR, "VK_ERROR_INCOMPATIBLE_DISPLAY_KHR"},
     {VK_ERROR_VALIDATION_FAILED_EXT, "VK_ERROR_VALIDATION_FAILED_EXT"},
     {VK_ERROR_INVALID_SHADER_NV, "VK_ERROR_INVALID_SHADER_NV"},
-    {VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
-     "VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT"},
+    {VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT, "VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT"},
     {VK_ERROR_NOT_PERMITTED_EXT, "VK_ERROR_NOT_PERMITTED_EXT"},
-    {VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
-     "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT"},
+    {VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT, "VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT"},
     {VK_THREAD_IDLE_KHR, "VK_THREAD_IDLE_KHR"},
     {VK_THREAD_DONE_KHR, "VK_THREAD_DONE_KHR"},
     {VK_OPERATION_DEFERRED_KHR, "VK_OPERATION_DEFERRED_KHR"},
     {VK_OPERATION_NOT_DEFERRED_KHR, "VK_OPERATION_NOT_DEFERRED_KHR"},
     {VK_PIPELINE_COMPILE_REQUIRED_EXT, "VK_PIPELINE_COMPILE_REQUIRED_EXT"},
     {VK_ERROR_OUT_OF_POOL_MEMORY_KHR, "VK_ERROR_OUT_OF_POOL_MEMORY_KHR"},
-    {VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR,
-     "VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR"},
+    {VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR, "VK_ERROR_INVALID_EXTERNAL_HANDLE_KHR"},
     {VK_ERROR_FRAGMENTATION_EXT, "VK_ERROR_FRAGMENTATION_EXT"},
-    {VK_ERROR_INVALID_DEVICE_ADDRESS_EXT,
-     "VK_ERROR_INVALID_DEVICE_ADDRESS_EXT"},
+    {VK_ERROR_INVALID_DEVICE_ADDRESS_EXT, "VK_ERROR_INVALID_DEVICE_ADDRESS_EXT"},
 };
 
 // Log an info message
@@ -146,48 +141,43 @@ struct VulkanResult {
 #define YG_DEBUG(fmt, ...)
 #else
 // Log a debug message. Only visible if NDEBUG is not defined.
-#define YG_DEBUG(fmt, ...)                                                     \
-    fprintf(stdout, "\x1B[1;92mDEBUG: \x1B[0m" fmt "\n", ##__VA_ARGS__);
+#define YG_DEBUG(fmt, ...) fprintf(stdout, "\x1B[1;92mDEBUG: \x1B[0m" fmt "\n", ##__VA_ARGS__);
 #endif
 
 // Log a warning message
-#define YG_WARNING(fmt, ...)                                                   \
-    fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__,    \
-            __LINE__, ##__VA_ARGS__);
+#define YG_WARNING(fmt, ...)                                                                                           \
+    fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);
 
 #ifdef NDEBUG
 // Log an error message
-#define YG_ERROR(fmt, ...)                                                     \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
-            __LINE__, ##__VA_ARGS__);                                          \
+#define YG_ERROR(fmt, ...)                                                                                             \
+    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
     abort();
 #else
 #if YGGDRASIL_WINDOWS
 // Log an error message. Will cause a breakpoint if NDEBUG is not defined.
-#define YG_ERROR(fmt, ...)                                                     \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
-            __LINE__, ##__VA_ARGS__);                                          \
+#define YG_ERROR(fmt, ...)                                                                                             \
+    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
     __debugbreak();
 #elif YGGDRASIL_LINUX
 // Log an error message. Will cause a SIGTRAP if NDEBUG is not defined.
-#define YG_ERROR(fmt, ...)                                                     \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__,      \
-            __LINE__, ##__VA_ARGS__);                                          \
+#define YG_ERROR(fmt, ...)                                                                                             \
+    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
     std::raise(SIGTRAP);
 #endif
 #endif
 
 // Check for Vulkan function call for errors
-#define VK_CHECK(x)                                                            \
-    do {                                                                       \
-        VkResult res = x;                                                      \
-        if (res) {                                                             \
-            for (size_t i = 0; i < YG_ARRAY_LEN(ygVulkanResults); i++) {       \
-                if ((res) == ygVulkanResults[i].result) {                      \
-                    YG_ERROR("%s", ygVulkanResults[i].string);                 \
-                }                                                              \
-            }                                                                  \
-        }                                                                      \
+#define VK_CHECK(x)                                                                                                    \
+    do {                                                                                                               \
+        VkResult res = x;                                                                                              \
+        if (res) {                                                                                                     \
+            for (size_t i = 0; i < YG_ARRAY_LEN(ygVulkanResults); i++) {                                               \
+                if ((res) == ygVulkanResults[i].result) {                                                              \
+                    YG_ERROR("%s", ygVulkanResults[i].string);                                                         \
+                }                                                                                                      \
+            }                                                                                                          \
+        }                                                                                                              \
     } while (0)
 
 
@@ -303,10 +293,10 @@ enum YgTextureType {
 
 // Texture is a combination of an Yggdrasil image and sampler. Create a new
 // texture with ygCreateTexture() and passing it a pointer to the texture data.
-// If stb_image.h is available and YGGDRASIL_STBI has been defined, textures can
-// be created from files using ygCreateTextureFromFile(). Mipmaps are
-// automatically generated if specified. Use ygSetTextureSampler() to assign a
-// sampler for the texture. The write descriptor for the texture can be
+// If stb_image.h is available and YGGDRASIL_USE_STB_IMAGE has been defined,
+// textures can be created from files using ygCreateTextureFromFile(). Mipmaps
+// are automatically generated if specified. Use ygSetTextureSampler() to assign
+// a sampler for the texture. The write descriptor for the texture can be
 // retrieved with ygGetTextureDescriptor(). Release resources with
 // ygDestroyTexture().
 typedef struct YgTexture {
@@ -352,6 +342,7 @@ typedef struct YgShader {
     VkShaderEXT shader;
     VkShaderCreateInfoEXT createInfo;
     char* pPath;
+    void* pCode;
 } YgShader;
 
 
@@ -367,12 +358,10 @@ extern YgSwapchain ygSwapchain;
 /// Create a new instance. Handle is internally managed and accessible through
 /// ygDevice.
 /// </summary>
-/// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or
-/// VK_MAKE_API_VERSION()</param> <param name="instanceExtensionCount">Number of
-/// instance extensions</param> <param name="ppInstanceExtensions">List of
-/// instance extensions to use</param>
-void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
-                      const char** ppInstanceExtensions);
+/// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or VK_MAKE_API_VERSION()</param>
+/// <param name="instanceExtensionCount">Number of instance extensions</param>
+/// <param name="ppInstanceExtensions">List of instance extensions to use</param>
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions);
 
 /// <summary>
 /// Release resources for the instance.
@@ -386,11 +375,9 @@ void ygDestroyInstance();
 /// <param name="physicalDeviceIndex">Physical device index to use</param>
 /// <param name="deviceExtensionCount">Number of device extensions</param>
 /// <param name="ppDeviceExtensions">List of device extensions to use</param>
-/// <param name="features">Pointer to features that will be put in pNext of
-/// VkDeviceCreateInfo, can be NULL</param> <param name="surface">Surface to
-/// use</param>
-void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
-                    const char** ppDeviceExtensions,
+/// <param name="features">Pointer to features that will be put in pNext of VkDeviceCreateInfo, can be NULL</param>
+/// <param name="surface">Surface to use</param>
+void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount, const char** ppDeviceExtensions,
                     VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface);
 
 /// <summary>
@@ -409,10 +396,8 @@ VkSampleCountFlagBits ygGetDeviceSampleCount();
 /// ygSwapchain.
 /// </summary>
 /// <param name="framesInFlight">Number of frames in flight to use</param>
-/// <param name="framebufferSizeCallback">Callback function where the current
-/// framebuffer size can be retrieved</param>
-void ygCreateSwapchain(uint32_t framesInFlight,
-                       void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
+/// <param name="framebufferSizeCallback">Callback function where the current framebuffer size can be retrieved</param>
+void ygCreateSwapchain(uint32_t framesInFlight, void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
 
 /// <summary>
 /// Release the resources for the swapchain.
@@ -446,8 +431,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage);
 /// <param name="usage">How the buffer will be used</param>
 /// <param name="properties">Properties of the memory to allocate</param>
 /// <param name="pBuffer">Where the created buffer will be stored</param>
-void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                    VkMemoryPropertyFlags properties, YgBuffer* pBuffer);
+void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, YgBuffer* pBuffer);
 
 /// <summary>
 /// Release resources for a buffer.
@@ -462,22 +446,20 @@ void ygDestroyBuffer(YgBuffer* pBuffer);
 /// <param name="pBuffer">Buffer to use</param>
 /// <param name="pData">Pointer to data to copy</param>
 /// <param name="size">Size of data to copy in bytes</param>
-/// <param name="offset">Offset into buffer's device memory to put the
-/// data</param>
-void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
-                          VkDeviceSize size, VkDeviceSize offset);
+/// <param name="offset">Offset into buffer's device memory to put the data</param>
+void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset);
 
 /// <summary>
 /// Get the write descriptor of a buffer.
 /// </summary>
 /// <param name="pBuffer">Buffer to use</param>
-/// <param name="binding">In which binding the buffer descriptor should be
-/// placed</param> <param name="offset">Offset into buffer to bind</param>
+/// <param name="binding">In which binding the buffer descriptor should be placed</param>
+/// <param name="type">Type of descriptor</param>
+/// <param name="offset">Offset into buffer to bind</param>
 /// <param name="range">Range in bytes to bind, can be VK_WHOLE_SIZE</param>
 /// <returns>A write descriptor set</returns>
-VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
-                                           VkDeviceSize offset,
-                                           VkDeviceSize range);
+VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
+                                           VkDeviceSize offset, VkDeviceSize range);
 
 /// <summary>
 /// Create a new image.
@@ -491,10 +473,8 @@ VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
 /// <param name="usage">How the image will be used</param>
 /// <param name="properties">Properties of the memory to allocate</param>
 /// <param name="pImage">Where the created image will be stored</param>
-void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
-                   VkSampleCountFlagBits samples, VkFormat format,
-                   VkImageTiling tiling, VkImageUsageFlags usage,
-                   VkMemoryPropertyFlags properties, YgImage* pImage);
+void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkSampleCountFlagBits samples, VkFormat format,
+                   VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, YgImage* pImage);
 
 /// <summary>
 /// Release resources for an image.
@@ -519,10 +499,8 @@ void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags);
 /// <param name="addressModeV">Address mode V (wrapping) to use</param>
 /// <param name="addressModeW">Address mode W (wrapping) to use</param>
 /// <param name="pSampler">Where the created sampler will be stored</param>
-void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
-                     VkSamplerMipmapMode mipmapMode,
-                     VkSamplerAddressMode addressModeU,
-                     VkSamplerAddressMode addressModeV,
+void ygCreateSampler(VkFilter magFilter, VkFilter minFilter, VkSamplerMipmapMode mipmapMode,
+                     VkSamplerAddressMode addressModeU, VkSamplerAddressMode addressModeV,
                      VkSamplerAddressMode addressModeW, YgSampler* pSampler);
 
 /// <summary>
@@ -542,12 +520,10 @@ void ygDestroySampler(YgSampler* pSampler);
 /// <param name="channels">Number of channels in texture</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
 /// <param name="pTexture">Where the created texture will be stored</param>
-void ygCreateTexture(enum YgTextureType type, VkFormat format,
-                     const void* pData, uint32_t width, uint32_t height,
-                     uint32_t channels, bool generateMipmaps,
-                     YgTexture* pTexture);
+void ygCreateTexture(enum YgTextureType type, VkFormat format, const void* pData, uint32_t width, uint32_t height,
+                     uint32_t channels, bool generateMipmaps, YgTexture* pTexture);
 
-#ifdef YGGDRASIL_STBI
+#ifdef YGGDRASIL_USE_STB_IMAGE
 /// <summary>
 /// Create a new texture from file.
 /// </summary>
@@ -556,8 +532,7 @@ void ygCreateTexture(enum YgTextureType type, VkFormat format,
 /// <param name="pPath">Path to texture file</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
 /// <param name="pTexture">Where the created texture will be stored</param>
-void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
-                             const char* pPath, bool generateMipmaps,
+void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format, const char* pPath, bool generateMipmaps,
                              YgTexture* pTexture);
 #endif
 
@@ -578,23 +553,21 @@ void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler);
 /// Get the write descriptor of a texture.
 /// </summary>
 /// <param name="pTexture">Texture to use</param>
-/// <param name="binding">In which binding the texture descriptor should be
-/// placed</param> <returns>A write descriptor set</returns>
-VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
-                                            uint32_t binding);
+/// <param name="binding">In which binding the texture descriptor should be placed</param>
+/// <param name="type">Type of descriptor</param>
+/// <returns>A write descriptor set</returns>
+VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture, uint32_t binding, VkDescriptorType type);
 
 /// <summary>
 /// Create a new pass.
 /// </summary>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
-/// <param name="pColorAttachments">List of images that should be used as color
-/// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
-/// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
-/// use, can be NULL</param> <param name="pPass">Where the created pass will be
-/// stored</param>
-void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments,
-                  YgImage* pDepthAttachment, YgImage* pResolveAttachment,
-                  YgPass* pPass);
+/// <param name="pColorAttachments">List of images that should be used as color attachments</param>
+/// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
+/// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
+/// <param name="pPass">Where the created pass will be stored</param>
+void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
+                  YgImage* pResolveAttachment, YgPass* pPass);
 
 /// <summary>
 /// Release resource for a pass.
@@ -608,12 +581,10 @@ void ygDestroyPass(YgPass* pPass);
 /// </summary>
 /// <param name="pPass">Pass to recreate</param>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
-/// <param name="pColorAttachments">List of images that should be used as color
-/// attachments</param> <param name="pDepthAttachment">Depth attachment to use,
-/// can be NULL</param> <param name="pResolveAttachment">Resolve attachment to
-/// use, can be NULL</param>
-void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount,
-                    YgImage* pColorAttachments, YgImage* pDepthAttachment,
+/// <param name="pColorAttachments">List of images that should be used as color attachments</param>
+/// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
+/// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
+void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
                     YgImage* pResolveAttachment);
 
 /// <summary>
@@ -623,8 +594,7 @@ void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount,
 /// <param name="pPass">Pass to use</param>
 /// <param name="clearValue">Clear value for attachments</param>
 /// <param name="loadOp">Load operation for attachments</param>
-void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
-                    VkClearValue clearValue, VkAttachmentLoadOp loadOp);
+void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass, VkClearValue clearValue, VkAttachmentLoadOp loadOp);
 
 /// <summary>
 /// End dynamic rendering using a pass.
@@ -643,11 +613,8 @@ void ygCmdEndPass(VkCommandBuffer cmd, const YgPass* pPass);
 /// <param name="pushConstantRangeCount">Number of push constant ranges</param>
 /// <param name="pPushConstantRanges">List of push constant ranges</param>
 /// <param name="pLayout">Where the created layout will be stored</param>
-void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
-                    VkShaderStageFlags* pStages, uint32_t* pCounts,
-                    uint32_t pushConstantRangeCount,
-                    VkPushConstantRange* pPushConstantRanges,
-                    YgLayout* pLayout);
+void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes, VkShaderStageFlags* pStages, uint32_t* pCounts,
+                    uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges, YgLayout* pLayout);
 
 /// <summary>
 /// Release resources for a layout.
@@ -664,8 +631,7 @@ void ygDestroyLayout(YgLayout* pLayout);
 /// <param name="nextStage">Which stages can come after this shader</param>
 /// <param name="pLayout">Layout to use</param>
 /// <param name="pShader">Where the created shader will be stored</param>
-void ygCreateShader(const void* pCode, size_t codeSize,
-                    VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
+void ygCreateShader(const void* pCode, size_t codeSize, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
                     const YgLayout* pLayout, YgShader* pShader);
 
 /// <summary>
@@ -676,8 +642,7 @@ void ygCreateShader(const void* pCode, size_t codeSize,
 /// <param name="nextStage">Which stages can come after this shader</param>
 /// <param name="pLayout">Layout to use</param>
 /// <param name="pShader">Where the created shader will be stored</param>
-void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
-                                VkShaderStageFlags nextStage,
+void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
                                 const YgLayout* pLayout, YgShader* pShader);
 
 /// <summary>
@@ -710,17 +675,14 @@ void ygCmdBindShader(VkCommandBuffer cmd, const YgShader* pShader);
 /// Set default states for rendering using shader objects.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
-/// <param name="vertexBindingDescriptionCount">Number of vertex binding
-/// descriptions</param> <param name="vertexBindingDescriptions">List of vertex
-/// binding descriptions</param> <param
-/// name="vertexAttributeDescriptionCount">Number of vertex attribute
-/// descriptions</param> <param name="vertexAttributeDescriptions">List of
-/// vertex attrubyte descriptions</param>
-void ygCmdSetDefaultStates(
-    VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
-    const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
-    uint32_t vertexAttributeDescriptionCount,
-    const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
+/// <param name="vertexBindingDescriptionCount">Number of vertex binding descriptions</param>
+/// <param name="vertexBindingDescriptions">List of vertex binding descriptions</param>
+/// <param name="vertexAttributeDescriptionCount">Number of vertex attribute descriptions</param>
+/// <param name="vertexAttributeDescriptions">List of vertex attrubyte descriptions</param>
+void ygCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+                           const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+                           uint32_t vertexAttributeDescriptionCount,
+                           const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
 
 // Inlined helper functions //
 
@@ -809,8 +771,7 @@ inline void ygCmdEnd(VkCommandBuffer cmd)
 /// <param name="typeFilter">Type filter to use</param>
 /// <param name="properties">Memory property flags</param>
 /// <returns>Index to memory type</returns>
-inline uint32_t ygFindMemoryType(uint32_t typeFilter,
-                                 VkMemoryPropertyFlags properties)
+inline uint32_t ygFindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
@@ -818,8 +779,7 @@ inline uint32_t ygFindMemoryType(uint32_t typeFilter,
 
     for (uint32_t i = 0; i < ygDevice.properties.memory.memoryTypeCount; i++) {
         if ((typeFilter & (1 << i)) &&
-            (ygDevice.properties.memory.memoryTypes[i].propertyFlags &
-             properties) == properties) {
+            (ygDevice.properties.memory.memoryTypes[i].propertyFlags & properties) == properties) {
             return i;
         }
     }
@@ -837,9 +797,7 @@ inline uint32_t ygFindMemoryType(uint32_t typeFilter,
 /// <param name="tiling">Required image tiling</param>
 /// <param name="features"Format feature flags></param>
 /// <returns>A supported format</returns>
-inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates,
-                                      uint32_t candidateCount,
-                                      VkImageTiling tiling,
+inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates, uint32_t candidateCount, VkImageTiling tiling,
                                       VkFormatFeatureFlags features)
 {
     if (!ygDevice.device) {
@@ -850,14 +808,11 @@ inline VkFormat ygFindSupportedFormat(VkFormat* pCandidates,
         VkFormat c = pCandidates[i];
 
         VkFormatProperties properties;
-        vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice, c,
-                                            &properties);
+        vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice, c, &properties);
 
-        if (tiling == VK_IMAGE_TILING_LINEAR &&
-            (properties.linearTilingFeatures & features) == features) {
+        if (tiling == VK_IMAGE_TILING_LINEAR && (properties.linearTilingFeatures & features) == features) {
             return c;
-        } else if (tiling == VK_IMAGE_TILING_OPTIMAL &&
-                   (properties.optimalTilingFeatures & features) == features) {
+        } else if (tiling == VK_IMAGE_TILING_OPTIMAL && (properties.optimalTilingFeatures & features) == features) {
             return c;
         }
     }
@@ -876,9 +831,8 @@ inline VkFormat ygFindDepthFormat()
         VK_FORMAT_D24_UNORM_S8_UINT,
     };
 
-    return ygFindSupportedFormat(
-        candidates, YG_ARRAY_LEN(candidates), VK_IMAGE_TILING_OPTIMAL,
-        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    return ygFindSupportedFormat(candidates, YG_ARRAY_LEN(candidates), VK_IMAGE_TILING_OPTIMAL,
+                                 VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
 }
 
 /// <summary>
@@ -887,19 +841,16 @@ inline VkFormat ygFindDepthFormat()
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="srcStage">Stage to wait for</param>
 /// <param name="srcAccess">Type of access to wait for</param>
-/// <param name="dstStage">Stage before which the barrier has to take
-/// place</param> <param name="dstAccess">Type of acces before which the barrer
-/// has to take place</param> <param name="oldLayout">Previous image
-/// layout</param> <param name="newLayout">New image layout</param> <param
-/// name="image">Image to use</param> <param
-/// name="pSubresourceRange">Subresource range to use, can be NULL in which case
-/// a default subrange is used.</param>
-inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
-                           VkAccessFlags2 srcAccess,
-                           VkPipelineStageFlags2 dstStage,
-                           VkAccessFlags2 dstAccess, VkImageLayout oldLayout,
-                           VkImageLayout newLayout, VkImage image,
-                           VkImageSubresourceRange* pSubresourceRange)
+/// <param name="dstStage">Stage before which the barrier has to take place</param>
+/// <param name="dstAccess">Type of acces before which the barrer has to take place</param>
+/// <param name="oldLayout">Previous image layout</param>
+/// <param name="newLayout">New image layout</param>
+/// <param name="image">Image to use</param>
+/// <param name="pSubresourceRange">Subresource range to use, can be NULL in which case a default subrange is
+/// used.</param>
+inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                           VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout oldLayout,
+                           VkImageLayout newLayout, VkImage image, VkImageSubresourceRange* pSubresourceRange)
 {
     VkImageSubresourceRange defaultSubresourceRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -920,8 +871,7 @@ inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
         .image = image,
-        .subresourceRange =
-            pSubresourceRange ? *pSubresourceRange : defaultSubresourceRange,
+        .subresourceRange = pSubresourceRange ? *pSubresourceRange : defaultSubresourceRange,
     };
 
     VkDependencyInfo dependencyInfo = {
@@ -941,13 +891,10 @@ inline void ygImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
 /// <param name="pImage">Image to transition</param>
 inline void ygTransitionForColorAttachment(VkCommandBuffer cmd, YgImage* pImage)
 {
-    ygImageBarrier(
-        cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT |
-            VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
-        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        pImage->image, NULL);
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, pImage->image, NULL);
 }
 
 /// <summary>
@@ -958,11 +905,9 @@ inline void ygTransitionForColorAttachment(VkCommandBuffer cmd, YgImage* pImage)
 /// <param name="pImage">Image to transition</param>
 inline void ygTransitionForBlitting(VkCommandBuffer cmd, YgImage* pImage)
 {
-    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                   VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pImage->image, NULL);
+                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pImage->image, NULL);
 }
 
 // Define YGGDRASIL_IMPLEMENTATION in exactly one compilation unit before
@@ -992,46 +937,40 @@ static YgSwapchain ygSwapchain;
 #define YG_UNUSED(x) (void)(x)
 
 // Macro for loading a device function pointers as Xvk...()
-#define VK_LOAD(func_name)                                                     \
-    PFN_##func_name X##func_name =                                             \
-        (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name)
+#define VK_LOAD(func_name)                                                                                             \
+    PFN_##func_name X##func_name = (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name)
 
 // Macro for calling a function via its vkGetDeviceProcAddr name
-#define VK_CALL(func_name, ...)                                                \
-    do {                                                                       \
-        PFN_##func_name pfn_##func_name =                                      \
-            (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name); \
-        pfn_##func_name(__VA_ARGS__);                                          \
+#define VK_CALL(func_name, ...)                                                                                        \
+    do {                                                                                                               \
+        PFN_##func_name pfn_##func_name = (PFN_##func_name)vkGetDeviceProcAddr(ygDevice.device, #func_name);           \
+        pfn_##func_name(__VA_ARGS__);                                                                                  \
     } while (0);
 
 #ifndef NDEBUG
-static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
-    VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
-    VkDebugUtilsMessageTypeFlagsEXT messageType,
-    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData, void* pUserData)
+static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+                                                    VkDebugUtilsMessageTypeFlagsEXT messageType,
+                                                    const VkDebugUtilsMessengerCallbackDataEXT* pCallbackData,
+                                                    void* pUserData)
 {
     switch (messageSeverity) {
     case VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT:
-        YG_WARNING("%s: %s", pCallbackData->pMessageIdName,
-                   pCallbackData->pMessage);
+        YG_WARNING("%s: %s", pCallbackData->pMessageIdName, pCallbackData->pMessage);
         break;
     case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
-        YG_ERROR("%s: %s", pCallbackData->pMessageIdName,
-                 pCallbackData->pMessage);
+        YG_ERROR("%s: %s", pCallbackData->pMessageIdName, pCallbackData->pMessage);
         break;
     }
 
     return VK_FALSE;
 }
 
-static VkResult createDebugUtilsMessengerEXT(
-    VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
-    const VkAllocationCallbacks* pAllocator,
-    VkDebugUtilsMessengerEXT* pDebugMessenger)
+static VkResult createDebugUtilsMessengerEXT(VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* pCreateInfo,
+                                             const VkAllocationCallbacks* pAllocator,
+                                             VkDebugUtilsMessengerEXT* pDebugMessenger)
 {
     PFN_vkCreateDebugUtilsMessengerEXT func =
-        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-            instance, "vkCreateDebugUtilsMessengerEXT");
+        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT");
     if (func != NULL) {
         return func(instance, pCreateInfo, pAllocator, pDebugMessenger);
     } else {
@@ -1039,28 +978,23 @@ static VkResult createDebugUtilsMessengerEXT(
     }
 }
 
-static void
-destroyDebugUtilsMessengerEXT(VkInstance instance,
-                              VkDebugUtilsMessengerEXT debugMessenger,
-                              const VkAllocationCallbacks* pAllocator)
+static void destroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT debugMessenger,
+                                          const VkAllocationCallbacks* pAllocator)
 {
     PFN_vkDestroyDebugUtilsMessengerEXT func =
-        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(
-            instance, "vkDestroyDebugUtilsMessengerEXT");
+        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT");
     if (func) {
         func(instance, debugMessenger, pAllocator);
     }
 }
 
-static void
-populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT* ci)
+static void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT* ci)
 {
     *ci = (VkDebugUtilsMessengerCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
-                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
-                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        .messageSeverity =
+            VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
         .pfnUserCallback = debugCallback,
     };
@@ -1071,13 +1005,11 @@ static void createDebugMessenger()
     VkDebugUtilsMessengerCreateInfoEXT ci;
     populateDebugMessengerCreateInfo(&ci);
 
-    VK_CHECK(createDebugUtilsMessengerEXT(ygDevice.instance, &ci, NULL,
-                                          &ygDevice.debugMessenger));
+    VK_CHECK(createDebugUtilsMessengerEXT(ygDevice.instance, &ci, NULL, &ygDevice.debugMessenger));
 }
 #endif
 
-void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
-                      const char** ppInstanceExtensions)
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions)
 {
     ygDevice.apiVersion = apiVersion;
 
@@ -1100,12 +1032,9 @@ void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
     ci.enabledLayerCount = YG_ARRAY_LEN(layers);
     ci.ppEnabledLayerNames = layers;
 
-    const char** ppExpandedExtensions =
-        YG_MALLOC((instanceExtensionCount + 1) * sizeof *ppExpandedExtensions);
-    memcpy(ppExpandedExtensions, ppInstanceExtensions,
-           instanceExtensionCount * sizeof *ppExpandedExtensions);
-    ppExpandedExtensions[instanceExtensionCount] =
-        VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    const char** ppExpandedExtensions = YG_MALLOC((instanceExtensionCount + 1) * sizeof *ppExpandedExtensions);
+    memcpy(ppExpandedExtensions, ppInstanceExtensions, instanceExtensionCount * sizeof *ppExpandedExtensions);
+    ppExpandedExtensions[instanceExtensionCount] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
 
     ci.enabledExtensionCount = instanceExtensionCount + 1;
     ci.ppEnabledExtensionNames = ppExpandedExtensions;
@@ -1115,8 +1044,8 @@ void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount,
 
     uint32_t version;
     VK_CHECK(vkEnumerateInstanceVersion(&version));
-    YG_INFO("Created Vulkan instance: %d.%d.%d", VK_API_VERSION_MAJOR(version),
-            VK_API_VERSION_MINOR(version), VK_API_VERSION_PATCH(version));
+    YG_INFO("Created Vulkan instance: %d.%d.%d", VK_API_VERSION_MAJOR(version), VK_API_VERSION_MINOR(version),
+            VK_API_VERSION_PATCH(version));
 
 #ifndef NDEBUG
     createDebugMessenger();
@@ -1128,22 +1057,18 @@ void ygDestroyInstance()
 {
     if (ygDevice.instance) {
 #if defined(_DEBUG)
-        destroyDebugUtilsMessengerEXT(ygDevice.instance,
-                                      ygDevice.debugMessenger, NULL);
+        destroyDebugUtilsMessengerEXT(ygDevice.instance, ygDevice.debugMessenger, NULL);
 #endif
         vkDestroyInstance(ygDevice.instance, NULL);
     }
 }
 
-static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount,
-                                        const char** ppDeviceExtensions)
+static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount, const char** ppDeviceExtensions)
 {
     uint32_t n;
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL,
-                                                  &n, NULL));
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL, &n, NULL));
     VkExtensionProperties* pAvailable = YG_MALLOC(n * sizeof *pAvailable);
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL,
-                                                  &n, pAvailable));
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(ygDevice.physicalDevice, NULL, &n, pAvailable));
 
     YG_DEBUG("Requesting device extensions (%d):", deviceExtensionCount);
     for (uint32_t i = 0; i < deviceExtensionCount; i++) {
@@ -1166,8 +1091,7 @@ static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount,
         }
 
         if (!found) {
-            YG_ERROR("The requested extension %s is not available",
-                     ppDeviceExtensions[i]);
+            YG_ERROR("The requested extension %s is not available", ppDeviceExtensions[i]);
             result = false;
         }
     }
@@ -1177,14 +1101,12 @@ static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount,
     return result;
 }
 
-static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
-                                    uint32_t requiredFamilyFlags)
+static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamilyFlags)
 {
     uint32_t n;
     vkGetPhysicalDeviceQueueFamilyProperties(ygDevice.physicalDevice, &n, NULL);
     VkQueueFamilyProperties* pProps = YG_MALLOC(n * sizeof *pProps);
-    vkGetPhysicalDeviceQueueFamilyProperties(ygDevice.physicalDevice, &n,
-                                             pProps);
+    vkGetPhysicalDeviceQueueFamilyProperties(ygDevice.physicalDevice, &n, pProps);
 
     if (!n) {
         YG_ERROR("No Vulkan queue family available");
@@ -1228,8 +1150,7 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
 
     // Check that the selected queue family supports PRESENT
     VkBool32 supported;
-    VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(ygDevice.physicalDevice,
-                                                  index, surface, &supported));
+    VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(ygDevice.physicalDevice, index, surface, &supported));
     if (!supported) {
         YG_ERROR("Selected queue family does not support PRESENT");
     }
@@ -1239,8 +1160,7 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface,
     return index;
 }
 
-void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
-                    const char** ppDeviceExtensions,
+void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount, const char** ppDeviceExtensions,
                     VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface)
 {
     if (!ygDevice.instance) {
@@ -1256,16 +1176,13 @@ void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
     // Iterate all physical devices
     uint32_t n;
     VK_CHECK(vkEnumeratePhysicalDevices(ygDevice.instance, &n, NULL));
-    VkPhysicalDevice* pPhysicalDevices =
-        YG_MALLOC(n * sizeof *pPhysicalDevices);
-    VK_CHECK(
-        vkEnumeratePhysicalDevices(ygDevice.instance, &n, pPhysicalDevices));
+    VkPhysicalDevice* pPhysicalDevices = YG_MALLOC(n * sizeof *pPhysicalDevices);
+    VK_CHECK(vkEnumeratePhysicalDevices(ygDevice.instance, &n, pPhysicalDevices));
 
     YG_INFO("Available devices (%d):", n);
     for (uint32_t i = 0; i < n; i++) {
         VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtp = {
-            .sType =
-                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
         };
 
         VkPhysicalDeviceDriverProperties driver = {
@@ -1282,19 +1199,14 @@ void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
 
         if (i == physicalDeviceIndex) {
             ygDevice.physicalDevice = pPhysicalDevices[i];
-            vkGetPhysicalDeviceProperties(ygDevice.physicalDevice,
-                                          &ygDevice.properties.physicalDevice);
-            vkGetPhysicalDeviceMemoryProperties(ygDevice.physicalDevice,
-                                                &ygDevice.properties.memory);
+            vkGetPhysicalDeviceProperties(ygDevice.physicalDevice, &ygDevice.properties.physicalDevice);
+            vkGetPhysicalDeviceMemoryProperties(ygDevice.physicalDevice, &ygDevice.properties.memory);
             ygDevice.properties.rayTracingPipeline = rtp;
         }
 
-        YG_INFO(" * [%d] %s, driver: %s %s, Vulkan %d.%d.%d %s", i,
-                prop.properties.deviceName, driver.driverName,
-                driver.driverInfo,
-                VK_API_VERSION_MAJOR(prop.properties.apiVersion),
-                VK_API_VERSION_MINOR(prop.properties.apiVersion),
-                VK_API_VERSION_PATCH(prop.properties.apiVersion),
+        YG_INFO(" * [%d] %s, driver: %s %s, Vulkan %d.%d.%d %s", i, prop.properties.deviceName, driver.driverName,
+                driver.driverInfo, VK_API_VERSION_MAJOR(prop.properties.apiVersion),
+                VK_API_VERSION_MINOR(prop.properties.apiVersion), VK_API_VERSION_PATCH(prop.properties.apiVersion),
                 i == physicalDeviceIndex ? "(chosen)" : "");
     }
 
@@ -1302,9 +1214,8 @@ void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
 
     checkDeviceExtensionSupport(deviceExtensionCount, ppDeviceExtensions);
 
-    uint32_t queueFamilyIndex = getQueueFamilyIndex(
-        surface,
-        VK_QUEUE_GRAPHICS_BIT && VK_QUEUE_COMPUTE_BIT && VK_QUEUE_TRANSFER_BIT);
+    uint32_t queueFamilyIndex =
+        getQueueFamilyIndex(surface, VK_QUEUE_GRAPHICS_BIT && VK_QUEUE_COMPUTE_BIT && VK_QUEUE_TRANSFER_BIT);
 
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {
@@ -1323,8 +1234,7 @@ void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
         .ppEnabledExtensionNames = ppDeviceExtensions,
     };
 
-    VK_CHECK(
-        vkCreateDevice(ygDevice.physicalDevice, &ci, NULL, &ygDevice.device));
+    VK_CHECK(vkCreateDevice(ygDevice.physicalDevice, &ci, NULL, &ygDevice.device));
 
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1332,8 +1242,7 @@ void ygCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount,
         .queueFamilyIndex = queueFamilyIndex,
     };
 
-    VK_CHECK(vkCreateCommandPool(ygDevice.device, &commandPoolCreateInfo, NULL,
-                                 &ygDevice.commandPool));
+    VK_CHECK(vkCreateCommandPool(ygDevice.device, &commandPoolCreateInfo, NULL, &ygDevice.commandPool));
     vkGetDeviceQueue(ygDevice.device, queueFamilyIndex, 0, &ygDevice.queue);
 }
 
@@ -1360,9 +1269,8 @@ void ygDestroyDevice()
 
 VkSampleCountFlagBits ygGetDeviceSampleCount()
 {
-    VkSampleCountFlags counts =
-        ygDevice.properties.physicalDevice.limits.framebufferColorSampleCounts &
-        ygDevice.properties.physicalDevice.limits.framebufferDepthSampleCounts;
+    VkSampleCountFlags counts = ygDevice.properties.physicalDevice.limits.framebufferColorSampleCounts &
+                                ygDevice.properties.physicalDevice.limits.framebufferDepthSampleCounts;
 
     if (counts & VK_SAMPLE_COUNT_64_BIT) {
         return VK_SAMPLE_COUNT_64_BIT;
@@ -1388,44 +1296,35 @@ VkSampleCountFlagBits ygGetDeviceSampleCount()
 
 static void querySupport()
 {
-    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-        ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.capabilities));
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(ygDevice.physicalDevice, ygDevice.surface,
+                                                       &ygSwapchain.supportDetails.capabilities));
 
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
-        ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.formatCount, NULL));
+    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(ygDevice.physicalDevice, ygDevice.surface,
+                                                  &ygSwapchain.supportDetails.formatCount, NULL));
     ygSwapchain.supportDetails.formats =
-        YG_MALLOC(ygSwapchain.supportDetails.formatCount *
-                  sizeof *ygSwapchain.supportDetails.formats);
-    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(
-        ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.formatCount,
-        ygSwapchain.supportDetails.formats));
+        YG_MALLOC(ygSwapchain.supportDetails.formatCount * sizeof *ygSwapchain.supportDetails.formats);
+    VK_CHECK(vkGetPhysicalDeviceSurfaceFormatsKHR(ygDevice.physicalDevice, ygDevice.surface,
+                                                  &ygSwapchain.supportDetails.formatCount,
+                                                  ygSwapchain.supportDetails.formats));
 
-    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
-        ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.presentCount, NULL));
+    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(ygDevice.physicalDevice, ygDevice.surface,
+                                                       &ygSwapchain.supportDetails.presentCount, NULL));
     ygSwapchain.supportDetails.presentModes =
-        YG_MALLOC(ygSwapchain.supportDetails.presentCount *
-                  sizeof *&ygSwapchain.supportDetails.presentModes);
-    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(
-        ygDevice.physicalDevice, ygDevice.surface,
-        &ygSwapchain.supportDetails.presentCount,
-        ygSwapchain.supportDetails.presentModes));
+        YG_MALLOC(ygSwapchain.supportDetails.presentCount * sizeof *&ygSwapchain.supportDetails.presentModes);
+    VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(ygDevice.physicalDevice, ygDevice.surface,
+                                                       &ygSwapchain.supportDetails.presentCount,
+                                                       ygSwapchain.supportDetails.presentModes));
 }
 
 // Iterate through available formats and return the one that matches what we
 // want. If what we want is not available, the first format in the array is
 // returned.
-static VkSurfaceFormatKHR
-chooseSurfaceFormat(uint32_t availableFormatsCount,
-                    const VkSurfaceFormatKHR* availableFormats)
+static VkSurfaceFormatKHR chooseSurfaceFormat(uint32_t availableFormatsCount,
+                                              const VkSurfaceFormatKHR* availableFormats)
 {
     for (uint32_t i = 0; i < availableFormatsCount; i++) {
         if (availableFormats[i].format == VK_FORMAT_B8G8R8A8_UNORM &&
-            availableFormats[i].colorSpace ==
-                VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            availableFormats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
             return availableFormats[i];
         }
     }
@@ -1435,9 +1334,8 @@ chooseSurfaceFormat(uint32_t availableFormatsCount,
 // Iterate through available present modes and see if a no v-sync mode is
 // available, otherwise go for VK_PRESENT_MODE_FIFO_KHR. If vsync is requested,
 // just go for VK_PRESENT_MODE_FIFO_KHR.
-static VkPresentModeKHR
-choosePresentMode(uint32_t availablePresentModeCount,
-                  const VkPresentModeKHR* availablePresentModes, bool vsync)
+static VkPresentModeKHR choosePresentMode(uint32_t availablePresentModeCount,
+                                          const VkPresentModeKHR* availablePresentModes, bool vsync)
 {
     if (vsync) {
         return VK_PRESENT_MODE_FIFO_KHR;
@@ -1454,8 +1352,7 @@ choosePresentMode(uint32_t availablePresentModeCount,
 
 // Set the resolution of the swapchain images. Use the size of the framebuffer
 // from the window.
-static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities,
-                               uint32_t width, uint32_t height)
+static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities, uint32_t width, uint32_t height)
 {
     if (capabilities->currentExtent.width != UINT32_MAX) {
         return capabilities->currentExtent;
@@ -1466,11 +1363,9 @@ static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities,
         };
 
         actualExtent.width =
-            YG_CLAMP(actualExtent.width, capabilities->minImageExtent.width,
-                     capabilities->maxImageExtent.width);
+            YG_CLAMP(actualExtent.width, capabilities->minImageExtent.width, capabilities->maxImageExtent.width);
         actualExtent.height =
-            YG_CLAMP(actualExtent.height, capabilities->minImageExtent.height,
-                     capabilities->maxImageExtent.height);
+            YG_CLAMP(actualExtent.height, capabilities->minImageExtent.height, capabilities->maxImageExtent.height);
 
         return actualExtent;
     }
@@ -1483,25 +1378,19 @@ static void createSwapchain()
     ygSwapchain.framebufferSizeCallback(&width, &height);
 
     VkSurfaceFormatKHR surfaceFormat =
-        chooseSurfaceFormat(ygSwapchain.supportDetails.formatCount,
-                            ygSwapchain.supportDetails.formats);
-    VkPresentModeKHR presentMode = choosePresentMode(
-        ygSwapchain.supportDetails.presentCount,
-        ygSwapchain.supportDetails.presentModes, ygDevice.vsync);
-    VkExtent2D extent =
-        chooseExtent(&ygSwapchain.supportDetails.capabilities, width, height);
+        chooseSurfaceFormat(ygSwapchain.supportDetails.formatCount, ygSwapchain.supportDetails.formats);
+    VkPresentModeKHR presentMode = choosePresentMode(ygSwapchain.supportDetails.presentCount,
+                                                     ygSwapchain.supportDetails.presentModes, ygDevice.vsync);
+    VkExtent2D extent = chooseExtent(&ygSwapchain.supportDetails.capabilities, width, height);
 
     // Using at least minImageCount number of images is required but using one
     // extra can avoid unnecessary waits on the driver
-    ygSwapchain.imageCount =
-        ygSwapchain.supportDetails.capabilities.minImageCount + 1;
+    ygSwapchain.imageCount = ygSwapchain.supportDetails.capabilities.minImageCount + 1;
 
     // Also make sure that we are not exceeding the maximum number of images
     if (ygSwapchain.supportDetails.capabilities.maxImageCount > 0 &&
-        ygSwapchain.imageCount >
-            ygSwapchain.supportDetails.capabilities.maxImageCount) {
-        ygSwapchain.imageCount =
-            ygSwapchain.supportDetails.capabilities.maxImageCount;
+        ygSwapchain.imageCount > ygSwapchain.supportDetails.capabilities.maxImageCount) {
+        ygSwapchain.imageCount = ygSwapchain.supportDetails.capabilities.maxImageCount;
     }
 
     VkSwapchainCreateInfoKHR ci = {
@@ -1512,11 +1401,9 @@ static void createSwapchain()
         .imageColorSpace = surfaceFormat.colorSpace,
         .imageExtent = extent,
         .imageArrayLayers = 1, // Unless rendering stereoscopically
-        .imageUsage =
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        .preTransform =
-            ygSwapchain.supportDetails.capabilities.currentTransform,
+        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .preTransform = ygSwapchain.supportDetails.capabilities.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = presentMode,
         .clipped = VK_TRUE,
@@ -1526,18 +1413,13 @@ static void createSwapchain()
     ygSwapchain.format = surfaceFormat.format;
     ygSwapchain.extent = extent;
 
-    VK_CHECK(vkCreateSwapchainKHR(ygDevice.device, &ci, NULL,
-                                  &ygSwapchain.swapchain));
+    VK_CHECK(vkCreateSwapchainKHR(ygDevice.device, &ci, NULL, &ygSwapchain.swapchain));
 
-    VK_CHECK(vkGetSwapchainImagesKHR(ygDevice.device, ygSwapchain.swapchain,
-                                     &ygSwapchain.imageCount, NULL));
-    ygSwapchain.images =
-        YG_MALLOC(ygSwapchain.imageCount * sizeof *ygSwapchain.images);
-    ygSwapchain.imageViews =
-        YG_MALLOC(ygSwapchain.imageCount * sizeof *ygSwapchain.imageViews);
-    VK_CHECK(vkGetSwapchainImagesKHR(ygDevice.device, ygSwapchain.swapchain,
-                                     &ygSwapchain.imageCount,
-                                     ygSwapchain.images));
+    VK_CHECK(vkGetSwapchainImagesKHR(ygDevice.device, ygSwapchain.swapchain, &ygSwapchain.imageCount, NULL));
+    ygSwapchain.images = YG_MALLOC(ygSwapchain.imageCount * sizeof *ygSwapchain.images);
+    ygSwapchain.imageViews = YG_MALLOC(ygSwapchain.imageCount * sizeof *ygSwapchain.imageViews);
+    VK_CHECK(
+        vkGetSwapchainImagesKHR(ygDevice.device, ygSwapchain.swapchain, &ygSwapchain.imageCount, ygSwapchain.images));
 
     for (uint32_t i = 0; i < ygSwapchain.imageCount; i++) {
         VkImageViewCreateInfo ci = {
@@ -1556,8 +1438,7 @@ static void createSwapchain()
                                  .layerCount = 1},
         };
 
-        VK_CHECK(vkCreateImageView(ygDevice.device, &ci, NULL,
-                                   &ygSwapchain.imageViews[i]));
+        VK_CHECK(vkCreateImageView(ygDevice.device, &ci, NULL, &ygSwapchain.imageViews[i]));
     }
 }
 
@@ -1585,19 +1466,14 @@ static void createSyncObjects()
         .commandBufferCount = ygSwapchain.framesInFlight,
     };
 
-    ygSwapchain.commandBuffers = YG_MALLOC(ygSwapchain.framesInFlight *
-                                           sizeof *ygSwapchain.commandBuffers);
+    ygSwapchain.commandBuffers = YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.commandBuffers);
     ygSwapchain.imageAvailableSemaphores =
-        YG_MALLOC(ygSwapchain.framesInFlight *
-                  sizeof *ygSwapchain.imageAvailableSemaphores);
+        YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.imageAvailableSemaphores);
     ygSwapchain.renderFinishedSemaphores =
-        YG_MALLOC(ygSwapchain.framesInFlight *
-                  sizeof *ygSwapchain.renderFinishedSemaphores);
-    ygSwapchain.inFlightFences = YG_MALLOC(ygSwapchain.framesInFlight *
-                                           sizeof *ygSwapchain.inFlightFences);
+        YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.renderFinishedSemaphores);
+    ygSwapchain.inFlightFences = YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.inFlightFences);
 
-    VK_CHECK(vkAllocateCommandBuffers(ygDevice.device, &ai,
-                                      ygSwapchain.commandBuffers));
+    VK_CHECK(vkAllocateCommandBuffers(ygDevice.device, &ai, ygSwapchain.commandBuffers));
 
     VkSemaphoreCreateInfo sci = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -1609,12 +1485,9 @@ static void createSyncObjects()
     };
 
     for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
-        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL,
-                                   &ygSwapchain.imageAvailableSemaphores[i]));
-        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL,
-                                   &ygSwapchain.renderFinishedSemaphores[i]));
-        VK_CHECK(vkCreateFence(ygDevice.device, &fci, NULL,
-                               &ygSwapchain.inFlightFences[i]));
+        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL, &ygSwapchain.imageAvailableSemaphores[i]));
+        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL, &ygSwapchain.renderFinishedSemaphores[i]));
+        VK_CHECK(vkCreateFence(ygDevice.device, &fci, NULL, &ygSwapchain.inFlightFences[i]));
     }
 }
 
@@ -1622,15 +1495,11 @@ static void destroySyncObjects()
 {
     vkDeviceWaitIdle(ygDevice.device);
 
-    vkFreeCommandBuffers(ygDevice.device, ygDevice.commandPool,
-                         ygSwapchain.framesInFlight,
-                         ygSwapchain.commandBuffers);
+    vkFreeCommandBuffers(ygDevice.device, ygDevice.commandPool, ygSwapchain.framesInFlight, ygSwapchain.commandBuffers);
 
     for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
-        vkDestroySemaphore(ygDevice.device,
-                           ygSwapchain.imageAvailableSemaphores[i], NULL);
-        vkDestroySemaphore(ygDevice.device,
-                           ygSwapchain.renderFinishedSemaphores[i], NULL);
+        vkDestroySemaphore(ygDevice.device, ygSwapchain.imageAvailableSemaphores[i], NULL);
+        vkDestroySemaphore(ygDevice.device, ygSwapchain.renderFinishedSemaphores[i], NULL);
         vkDestroyFence(ygDevice.device, ygSwapchain.inFlightFences[i], NULL);
     }
 
@@ -1640,8 +1509,7 @@ static void destroySyncObjects()
     YG_FREE(ygSwapchain.inFlightFences);
 }
 
-void ygCreateSwapchain(uint32_t framesInFlight,
-                       void (*framebufferSizeCallback)(uint32_t*, uint32_t*))
+void ygCreateSwapchain(uint32_t framesInFlight, void (*framebufferSizeCallback)(uint32_t*, uint32_t*))
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
@@ -1699,19 +1567,14 @@ void ygRecreateSwapchain()
 VkCommandBuffer ygAcquireNextImage()
 {
     // Wait for the current frame to not be in flight
-    VK_CHECK(
-        vkWaitForFences(ygDevice.device, 1,
-                        &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex],
-                        VK_TRUE, UINT64_MAX));
-    VK_CHECK(
-        vkResetFences(ygDevice.device, 1,
-                      &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
+    VK_CHECK(vkWaitForFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex], VK_TRUE,
+                             UINT64_MAX));
+    VK_CHECK(vkResetFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
 
     // Acquire index of next image in the swapchain
-    VkResult result = vkAcquireNextImageKHR(
-        ygDevice.device, ygSwapchain.swapchain, UINT64_MAX,
-        ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex], NULL,
-        &ygSwapchain.imageIndex);
+    VkResult result = vkAcquireNextImageKHR(ygDevice.device, ygSwapchain.swapchain, UINT64_MAX,
+                                            ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex], NULL,
+                                            &ygSwapchain.imageIndex);
 
     // Check if swapchain needs to be reconstructed
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -1725,8 +1588,7 @@ VkCommandBuffer ygAcquireNextImage()
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
 
-    VK_CHECK(vkBeginCommandBuffer(
-        ygSwapchain.commandBuffers[ygSwapchain.inFlightIndex], &bi));
+    VK_CHECK(vkBeginCommandBuffer(ygSwapchain.commandBuffers[ygSwapchain.inFlightIndex], &bi));
 
     return ygSwapchain.commandBuffers[ygSwapchain.inFlightIndex];
 }
@@ -1738,12 +1600,9 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     }
 
     // Transition swapchain image for blitting
-    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                   VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
-                   VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                   VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   ygSwapchain.images[ygSwapchain.imageIndex], NULL);
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+                   VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, ygSwapchain.images[ygSwapchain.imageIndex], NULL);
 
     // Blit image to current swapchain image
     VkImageSubresourceLayers subresourceLayers = {
@@ -1778,39 +1637,31 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     vkCmdBlitImage2(cmd, &blitImageInfo);
 
     // Transition swapchain image for presenting
-    ygImageBarrier(
-        cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        ygSwapchain.images[ygSwapchain.imageIndex], NULL);
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, ygSwapchain.images[ygSwapchain.imageIndex], NULL);
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
-    VkPipelineStageFlags waitStage =
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores =
-            &ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex],
+        .pWaitSemaphores = &ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex],
         .pWaitDstStageMask = &waitStage,
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores =
-            &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
+        .pSignalSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
     };
 
-    VK_CHECK(
-        vkQueueSubmit(ygDevice.queue, 1, &si,
-                      ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
+    VK_CHECK(vkQueueSubmit(ygDevice.queue, 1, &si, ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
 
     VkPresentInfoKHR pi = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores =
-            &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
+        .pWaitSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
         .swapchainCount = 1,
         .pSwapchains = &ygSwapchain.swapchain,
         .pImageIndices = &ygSwapchain.imageIndex,
@@ -1824,12 +1675,10 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
         YG_ERROR("Failed to present swapchain image");
     }
 
-    ygSwapchain.inFlightIndex =
-        (ygSwapchain.inFlightIndex + 1) % ygSwapchain.framesInFlight;
+    ygSwapchain.inFlightIndex = (ygSwapchain.inFlightIndex + 1) % ygSwapchain.framesInFlight;
 }
 
-void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
-                    VkMemoryPropertyFlags properties, YgBuffer* pBuffer)
+void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, YgBuffer* pBuffer)
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
@@ -1838,6 +1687,7 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
     *pBuffer = (YgBuffer){
         .usage = usage,
         .properties = properties,
+        .pHostMap = NULL,
     };
 
     VkBufferCreateInfo ci = {
@@ -1871,16 +1721,13 @@ void ygCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
         allocInfo.pNext = &allocFlagInfo;
     }
 
-    VK_CHECK(
-        vkAllocateMemory(ygDevice.device, &allocInfo, NULL, &pBuffer->memory));
+    VK_CHECK(vkAllocateMemory(ygDevice.device, &allocInfo, NULL, &pBuffer->memory));
 
-    VK_CHECK(vkBindBufferMemory(ygDevice.device, pBuffer->buffer,
-                                pBuffer->memory, 0));
+    VK_CHECK(vkBindBufferMemory(ygDevice.device, pBuffer->buffer, pBuffer->memory, 0));
 
     // Map memory if memory is host coherent
     if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-        VK_CHECK(vkMapMemory(ygDevice.device, pBuffer->memory, 0, size, 0,
-                             &pBuffer->pHostMap));
+        VK_CHECK(vkMapMemory(ygDevice.device, pBuffer->memory, 0, size, 0, &pBuffer->pHostMap));
     }
 }
 
@@ -1888,7 +1735,7 @@ void ygDestroyBuffer(YgBuffer* pBuffer)
 {
     vkDeviceWaitIdle(ygDevice.device);
 
-    if (pBuffer->pHostMap) {
+    if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
         vkUnmapMemory(ygDevice.device, pBuffer->memory);
     }
 
@@ -1898,17 +1745,14 @@ void ygDestroyBuffer(YgBuffer* pBuffer)
     YG_RESET(pBuffer);
 }
 
-void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
-                          VkDeviceSize size, VkDeviceSize offset)
+void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset)
 {
     // Check if we need a staging buffer or not
     if (!(pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
         // Set up staging buffer
         YgBuffer staging;
         ygCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                       &staging);
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging);
 
         // Copy to staging buffer
         ygCopyBufferFromHost(&staging, pData, size, 0);
@@ -1932,9 +1776,8 @@ void ygCopyBufferFromHost(const YgBuffer* pBuffer, const void* pData,
     }
 }
 
-VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
-                                           VkDeviceSize offset,
-                                           VkDeviceSize range)
+VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
+                                           VkDeviceSize offset, VkDeviceSize range)
 {
     pBuffer->bufferInfo = (VkDescriptorBufferInfo){
         .buffer = pBuffer->buffer,
@@ -1947,15 +1790,13 @@ VkWriteDescriptorSet ygGetBufferDescriptor(YgBuffer* pBuffer, uint32_t binding,
         .dstBinding = binding,
         .dstArrayElement = 0,
         .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorType = type,
         .pBufferInfo = &pBuffer->bufferInfo,
     };
 }
 
-void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
-                   VkSampleCountFlagBits samples, VkFormat format,
-                   VkImageTiling tiling, VkImageUsageFlags usage,
-                   VkMemoryPropertyFlags properties, YgImage* pImage)
+void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkSampleCountFlagBits samples, VkFormat format,
+                   VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, YgImage* pImage)
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
@@ -1994,11 +1835,9 @@ void ygCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels,
         .memoryTypeIndex = ygFindMemoryType(memReqs.memoryTypeBits, properties),
     };
 
-    VK_CHECK(
-        vkAllocateMemory(ygDevice.device, &allocInfo, NULL, &pImage->memory));
+    VK_CHECK(vkAllocateMemory(ygDevice.device, &allocInfo, NULL, &pImage->memory));
 
-    VK_CHECK(
-        vkBindImageMemory(ygDevice.device, pImage->image, pImage->memory, 0));
+    VK_CHECK(vkBindImageMemory(ygDevice.device, pImage->image, pImage->memory, 0));
 }
 
 void ygDestroyImage(YgImage* pImage)
@@ -2037,10 +1876,8 @@ void ygCreateImageView(YgImage* pImage, VkImageAspectFlags aspectFlags)
     VK_CHECK(vkCreateImageView(ygDevice.device, &ci, NULL, &pImage->imageView));
 }
 
-void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
-                     VkSamplerMipmapMode mipmapMode,
-                     VkSamplerAddressMode addressModeU,
-                     VkSamplerAddressMode addressModeV,
+void ygCreateSampler(VkFilter magFilter, VkFilter minFilter, VkSamplerMipmapMode mipmapMode,
+                     VkSamplerAddressMode addressModeU, VkSamplerAddressMode addressModeV,
                      VkSamplerAddressMode addressModeW, YgSampler* pSampler)
 {
     if (!ygDevice.device) {
@@ -2057,8 +1894,7 @@ void ygCreateSampler(VkFilter magFilter, VkFilter minFilter,
         .addressModeW = addressModeW,
         .mipLodBias = 0.0f,
         .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy =
-            ygDevice.properties.physicalDevice.limits.maxSamplerAnisotropy,
+        .maxAnisotropy = ygDevice.properties.physicalDevice.limits.maxSamplerAnisotropy,
         .compareEnable = VK_FALSE,
         .compareOp = VK_COMPARE_OP_ALWAYS,
         .minLod = 0.0f,
@@ -2082,11 +1918,9 @@ void ygDestroySampler(YgSampler* pSampler)
 static void generateMipmaps(YgTexture* pTexture)
 {
     VkFormatProperties props;
-    vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice,
-                                        pTexture->image.format, &props);
+    vkGetPhysicalDeviceFormatProperties(ygDevice.physicalDevice, pTexture->image.format, &props);
 
-    if (!(props.optimalTilingFeatures &
-          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+    if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
         YG_ERROR("Texture image format does not support linear blitting");
     }
 
@@ -2105,12 +1939,10 @@ static void generateMipmaps(YgTexture* pTexture)
     for (uint32_t i = 1; i < pTexture->image.mipLevels; i++) {
         subresourceRange.baseMipLevel = i - 1;
 
-        ygImageBarrier(
-            cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-            VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pTexture->image.image,
-            &subresourceRange);
+        ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       pTexture->image.image, &subresourceRange);
 
         VkImageBlit2 region = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
@@ -2123,9 +1955,7 @@ static void generateMipmaps(YgTexture* pTexture)
                                .mipLevel = i,
                                .baseArrayLayer = 0,
                                .layerCount = 1},
-            .dstOffsets = {{0, 0, 0},
-                           {mipWidth > 1 ? mipWidth / 2 : 1,
-                            mipHeight > 1 ? mipHeight / 2 : 1, 1}},
+            .dstOffsets = {{0, 0, 0}, {mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1}},
         };
 
         VkBlitImageInfo2 blitImageInfo = {
@@ -2141,12 +1971,9 @@ static void generateMipmaps(YgTexture* pTexture)
 
         vkCmdBlitImage2(cmd, &blitImageInfo);
 
-        ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
-                       VK_ACCESS_2_TRANSFER_READ_BIT,
-                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                       VK_ACCESS_2_SHADER_READ_BIT,
-                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_READ_BIT,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        pTexture->image.image, &subresourceRange);
 
         if (mipWidth > 1) {
@@ -2159,30 +1986,24 @@ static void generateMipmaps(YgTexture* pTexture)
 
     subresourceRange.baseMipLevel = pTexture->image.mipLevels - 1;
 
-    ygImageBarrier(
-        cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR,
-        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, pTexture->image.image,
-        &subresourceRange);
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   pTexture->image.image, &subresourceRange);
 
     ygCmdEnd(cmd);
 }
 
-static void createTexture(YgTexture* pTexture, enum YgTextureType type,
-                          VkFormat format, const void* pData, uint32_t width,
-                          uint32_t height, uint32_t channels, bool mipmaps)
+static void createTexture(YgTexture* pTexture, enum YgTextureType type, VkFormat format, const void* pData,
+                          uint32_t width, uint32_t height, uint32_t channels, bool mipmaps)
 {
     uint32_t mipLevels = 1;
     if (mipmaps) {
         mipLevels = (uint32_t)floor(log2(YG_MAX(width, height))) + 1;
     }
 
-    ygCreateImage(width, height, mipLevels, VK_SAMPLE_COUNT_1_BIT, format,
-                  VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                      VK_IMAGE_USAGE_SAMPLED_BIT,
+    ygCreateImage(width, height, mipLevels, VK_SAMPLE_COUNT_1_BIT, format, VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTexture->image);
 
     if (pData) {
@@ -2190,19 +2011,15 @@ static void createTexture(YgTexture* pTexture, enum YgTextureType type,
 
         YgBuffer staging;
         ygCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                       &staging);
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging);
 
         ygCopyBufferFromHost(&staging, pData, size, 0);
 
         VkCommandBuffer cmd = ygCmdBegin();
 
-        ygImageBarrier(
-            cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            pTexture->image.image, NULL);
+        ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                       VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       pTexture->image.image, NULL);
 
         VkBufferImageCopy region = {
             .bufferOffset = 0,
@@ -2216,8 +2033,7 @@ static void createTexture(YgTexture* pTexture, enum YgTextureType type,
             .imageExtent = {width, height, 1},
         };
 
-        vkCmdCopyBufferToImage(cmd, staging.buffer, pTexture->image.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+        vkCmdCopyBufferToImage(cmd, staging.buffer, pTexture->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                                &region);
 
         ygCmdEnd(cmd);
@@ -2226,12 +2042,9 @@ static void createTexture(YgTexture* pTexture, enum YgTextureType type,
             generateMipmaps(pTexture);
         } else {
             cmd = ygCmdBegin();
-            ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                           VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-                           VK_ACCESS_2_SHADER_READ_BIT,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                            pTexture->image.image, NULL);
             ygCmdEnd(cmd);
         }
@@ -2248,18 +2061,14 @@ static void createTexture(YgTexture* pTexture, enum YgTextureType type,
     };
 }
 
-void ygCreateTexture(enum YgTextureType type, VkFormat format,
-                     const void* pData, uint32_t width, uint32_t height,
-                     uint32_t channels, bool generateMipmaps,
-                     YgTexture* pTexture)
+void ygCreateTexture(enum YgTextureType type, VkFormat format, const void* pData, uint32_t width, uint32_t height,
+                     uint32_t channels, bool generateMipmaps, YgTexture* pTexture)
 {
-    createTexture(pTexture, type, format, pData, width, height, channels,
-                  generateMipmaps);
+    createTexture(pTexture, type, format, pData, width, height, channels, generateMipmaps);
 }
 
-#ifdef YGGDRASIL_STBI
-void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
-                             const char* pPath, bool generateMipmaps,
+#ifdef YGGDRASIL_USE_STB_IMAGE
+void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format, const char* pPath, bool generateMipmaps,
                              YgTexture* pTexture)
 {
     YG_INFO("Loading texture from %s", pPath);
@@ -2268,8 +2077,7 @@ void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
 
     int width, height, channels;
 
-    stbi_uc* pData =
-        stbi_load(pPath, &width, &height, &channels, STBI_rgb_alpha);
+    stbi_uc* pData = stbi_load(pPath, &width, &height, &channels, STBI_rgb_alpha);
     channels = STBI_rgb_alpha;
 
     if (!pData) {
@@ -2277,8 +2085,7 @@ void ygCreateTextureFromFile(enum YgTextureType type, VkFormat format,
         return;
     }
 
-    createTexture(pTexture, type, format, pData, width, height, channels,
-                  generateMipmaps);
+    createTexture(pTexture, type, format, pData, width, height, channels, generateMipmaps);
 
     stbi_image_free(pData);
 }
@@ -2294,26 +2101,23 @@ void ygSetTextureSampler(YgTexture* pTexture, const YgSampler* pSampler)
     pTexture->imageInfo.sampler = pSampler->sampler;
 }
 
-VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture,
-                                            uint32_t binding)
+VkWriteDescriptorSet ygGetTextureDescriptor(const YgTexture* pTexture, uint32_t binding, VkDescriptorType type)
 {
     return (VkWriteDescriptorSet){
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstBinding = binding,
         .dstArrayElement = 0,
         .descriptorCount = 1,
-        .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .descriptorType = type,
         .pImageInfo = &pTexture->imageInfo,
     };
 }
 
-static createPass(YgPass* pPass, uint32_t colorAttachmentCount,
-                  YgImage* pColorAttachments, YgImage* pDepthAttachment,
+static createPass(YgPass* pPass, uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
                   YgImage* pResolveAttachment)
 {
     *pPass = (YgPass){
-        .pRenderingAttachmentInfos =
-            YG_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
+        .pRenderingAttachmentInfos = YG_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
         .pFormats = YG_MALLOC(colorAttachmentCount * sizeof(VkFormat)),
         .pColorAttachments = pColorAttachments,
         .colorAttachmentCount = colorAttachmentCount,
@@ -2326,15 +2130,10 @@ static createPass(YgPass* pPass, uint32_t colorAttachmentCount,
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = pPass->pColorAttachments[i].imageView,
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .resolveMode = pPass->pResolveAttachment
-                               ? VK_RESOLVE_MODE_AVERAGE_BIT
-                               : VK_RESOLVE_MODE_NONE,
-            .resolveImageView = pPass->pResolveAttachment
-                                    ? pPass->pResolveAttachment->imageView
-                                    : NULL,
-            .resolveImageLayout = pPass->pResolveAttachment
-                                      ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
-                                      : VK_IMAGE_LAYOUT_UNDEFINED,
+            .resolveMode = pPass->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+            .resolveImageView = pPass->pResolveAttachment ? pPass->pResolveAttachment->imageView : NULL,
+            .resolveImageLayout =
+                pPass->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         };
         pPass->pFormats[i] = pPass->pColorAttachments[i].format;
@@ -2348,12 +2147,10 @@ static createPass(YgPass* pPass, uint32_t colorAttachmentCount,
     };
 }
 
-void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments,
-                  YgImage* pDepthAttachment, YgImage* pResolveAttachment,
-                  YgPass* pPass)
+void ygCreatePass(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
+                  YgImage* pResolveAttachment, YgPass* pPass)
 {
-    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment,
-               pResolveAttachment);
+    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
 void ygDestroyPass(YgPass* pPass)
@@ -2364,18 +2161,15 @@ void ygDestroyPass(YgPass* pPass)
     YG_RESET(pPass);
 }
 
-void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount,
-                    YgImage* pColorAttachments, YgImage* pDepthAttachment,
+void ygRecreatePass(YgPass* pPass, uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
                     YgImage* pResolveAttachment)
 {
     YG_FREE(pPass->pRenderingAttachmentInfos);
     YG_FREE(pPass->pFormats);
-    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment,
-               pResolveAttachment);
+    createPass(pPass, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
-                    VkClearValue clearValue, VkAttachmentLoadOp loadOp)
+void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass, VkClearValue clearValue, VkAttachmentLoadOp loadOp)
 {
     for (uint32_t i = 0; i < pPass->colorAttachmentCount; i++) {
         pPass->pRenderingAttachmentInfos[i].clearValue = clearValue;
@@ -2387,11 +2181,10 @@ void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = pPass->pDepthAttachment->imageView,
-            .imageLayout =
-                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue = clearValue,
+            .clearValue.depthStencil = {.depth = 0.0f, .stencil = 0},
         };
     }
 
@@ -2406,8 +2199,7 @@ void ygCmdBeginPass(VkCommandBuffer cmd, const YgPass* pPass,
         .layerCount = 1,
         .colorAttachmentCount = pPass->colorAttachmentCount,
         .pColorAttachments = pPass->pRenderingAttachmentInfos,
-        .pDepthAttachment =
-            pPass->pDepthAttachment ? &depthAttachmentInfo : NULL,
+        .pDepthAttachment = pPass->pDepthAttachment ? &depthAttachmentInfo : NULL,
         .pStencilAttachment = NULL,
     };
 
@@ -2420,32 +2212,29 @@ void ygCmdEndPass(VkCommandBuffer cmd, const YgPass* pPass)
     vkCmdEndRendering(cmd);
 }
 
-void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
-                    VkShaderStageFlags* pStages, uint32_t* pCounts,
-                    uint32_t pushConstantRangeCount,
-                    VkPushConstantRange* pPushConstantRanges, YgLayout* pLayout)
+void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes, VkShaderStageFlags* pStages, uint32_t* pCounts,
+                    uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges, YgLayout* pLayout)
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
     }
 
-    size_t pushConstantRangeSize =
-        pushConstantRangeCount * sizeof(VkPushConstantRange);
+    size_t pushConstantRangeSize = pushConstantRangeCount * sizeof(VkPushConstantRange);
 
     *pLayout = (YgLayout){
-        .pPushConstantRanges = YG_MALLOC(pushConstantRangeSize),
         .pushConstantRangeCount = pushConstantRangeCount,
     };
 
-    memcpy(pLayout->pPushConstantRanges, pPushConstantRanges,
-           pushConstantRangeSize);
+    if (pLayout->pushConstantRangeCount) {
+        pLayout->pPushConstantRanges = YG_MALLOC(pushConstantRangeSize);
+        memcpy(pLayout->pPushConstantRanges, pPushConstantRanges, pushConstantRangeSize);
+    }
 
-    VkDescriptorSetLayoutBinding* pBindings =
-        YG_MALLOC(bindingCount * sizeof *pBindings);
+    VkDescriptorSetLayoutBinding* pBindings = YG_MALLOC(bindingCount * sizeof *pBindings);
 
     for (uint32_t i = 0; i < bindingCount; i++) {
         pBindings[i] = (VkDescriptorSetLayoutBinding){
-            .binding = 0,
+            .binding = i,
             .descriptorType = pTypes[i],
             .descriptorCount = pCounts[i],
             .stageFlags = pStages[i],
@@ -2459,8 +2248,7 @@ void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
         .pBindings = pBindings,
     };
 
-    VK_CHECK(vkCreateDescriptorSetLayout(ygDevice.device, &setLayoutCreateInfo,
-                                         NULL, &pLayout->setLayout));
+    VK_CHECK(vkCreateDescriptorSetLayout(ygDevice.device, &setLayoutCreateInfo, NULL, &pLayout->setLayout));
 
     VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
@@ -2469,8 +2257,7 @@ void ygCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes,
         .pushConstantRangeCount = pLayout->pushConstantRangeCount,
         .pPushConstantRanges = pLayout->pPushConstantRanges,
     };
-    VK_CHECK(vkCreatePipelineLayout(ygDevice.device, &pipelineLayoutCreateInfo,
-                                    NULL, &pLayout->pipelineLayout));
+    VK_CHECK(vkCreatePipelineLayout(ygDevice.device, &pipelineLayoutCreateInfo, NULL, &pLayout->pipelineLayout));
 
     YG_FREE(pBindings);
 }
@@ -2482,18 +2269,22 @@ void ygDestroyLayout(YgLayout* pLayout)
     vkDestroyPipelineLayout(ygDevice.device, pLayout->pipelineLayout, NULL);
     vkDestroyDescriptorSetLayout(ygDevice.device, pLayout->setLayout, NULL);
 
-    YG_FREE(pLayout->pPushConstantRanges);
+    if (pLayout->pPushConstantRanges) {
+        YG_FREE(pLayout->pPushConstantRanges);
+    }
 
     YG_RESET(pLayout);
 }
 
-void createShader(YgShader* pShader, const void* pCode, size_t codeSize,
-                  VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
-                  const YgLayout* pLayout)
+void createShader(YgShader* pShader, const void* pCode, size_t codeSize, VkShaderStageFlagBits stage,
+                  VkShaderStageFlags nextStage, const YgLayout* pLayout)
 {
     if (!ygDevice.device) {
         YG_ERROR("Device not initialized");
     }
+
+    pShader->pCode = YG_MALLOC(codeSize);
+    memcpy(pShader->pCode, pCode, codeSize);
 
     pShader->createInfo = (VkShaderCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
@@ -2502,7 +2293,7 @@ void createShader(YgShader* pShader, const void* pCode, size_t codeSize,
         .nextStage = nextStage,
         .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
         .codeSize = codeSize,
-        .pCode = pCode,
+        .pCode = pShader->pCode,
         .pName = "main",
         .setLayoutCount = 1,
         .pSetLayouts = &pLayout->setLayout,
@@ -2512,15 +2303,13 @@ void createShader(YgShader* pShader, const void* pCode, size_t codeSize,
     };
 }
 
-void ygCreateShader(const void* pCode, size_t codeSize,
-                    VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
+void ygCreateShader(const void* pCode, size_t codeSize, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
                     const YgLayout* pLayout, YgShader* pShader)
 {
     createShader(pShader, pCode, codeSize, stage, nextStage, pLayout);
 }
 
-void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
-                                VkShaderStageFlags nextStage,
+void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
                                 const YgLayout* pLayout, YgShader* pShader)
 {
     size_t sz = strlen(pPath) + 1;
@@ -2543,40 +2332,87 @@ void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
     file_size = ftell(file);
     rewind(file);
 
-    char* pShaderSource = YG_MALLOC(file_size);
+    char* pShaderSource = YG_MALLOC(file_size + 1);
     fread(pShaderSource, 1, file_size, file);
+    pShaderSource[file_size] = 0;
 
     fclose(file);
 
     // Compile GLSL to SPIR-V
-    glslang_target_client_version_t targetVersion = GLSLANG_TARGET_VULKAN_1_0;
+    glslang_target_client_version_t glslangVersion = GLSLANG_TARGET_VULKAN_1_0;
     switch (VK_VERSION_MAJOR(ygDevice.apiVersion)) {
     case 1:
         switch (VK_VERSION_MINOR(ygDevice.apiVersion)) {
         case 0:
-            targetVersion = GLSLANG_TARGET_VULKAN_1_0;
+            glslangVersion = GLSLANG_TARGET_VULKAN_1_0;
             break;
         case 1:
-            targetVersion = GLSLANG_TARGET_VULKAN_1_1;
+            glslangVersion = GLSLANG_TARGET_VULKAN_1_1;
             break;
         case 2:
-            targetVersion = GLSLANG_TARGET_VULKAN_1_2;
+            glslangVersion = GLSLANG_TARGET_VULKAN_1_2;
             break;
         case 3:
-            targetVersion = GLSLANG_TARGET_VULKAN_1_3;
+            glslangVersion = GLSLANG_TARGET_VULKAN_1_3;
             break;
         case 4:
-            targetVersion = GLSLANG_TARGET_VULKAN_1_4;
+            glslangVersion = GLSLANG_TARGET_VULKAN_1_4;
             break;
         }
         break;
     }
 
+    glslang_stage_mask_t glslangStage = GLSLANG_STAGE_VERTEX;
+    switch (stage) {
+    case VK_SHADER_STAGE_VERTEX_BIT:
+        glslangStage = GLSLANG_STAGE_VERTEX;
+        break;
+    case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+        glslangStage = GLSLANG_STAGE_TESSCONTROL;
+        break;
+    case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+        glslangStage = GLSLANG_STAGE_TESSEVALUATION;
+        break;
+    case VK_SHADER_STAGE_GEOMETRY_BIT:
+        glslangStage = GLSLANG_STAGE_GEOMETRY;
+        break;
+    case VK_SHADER_STAGE_FRAGMENT_BIT:
+        glslangStage = GLSLANG_STAGE_FRAGMENT;
+        break;
+    case VK_SHADER_STAGE_COMPUTE_BIT:
+        glslangStage = GLSLANG_STAGE_COMPUTE;
+        break;
+    case VK_SHADER_STAGE_RAYGEN_BIT_KHR:
+        glslangStage = GLSLANG_STAGE_RAYGEN;
+        break;
+    case VK_SHADER_STAGE_INTERSECTION_BIT_KHR:
+        glslangStage = GLSLANG_STAGE_INTERSECT;
+        break;
+    case VK_SHADER_STAGE_ANY_HIT_BIT_NV:
+        glslangStage = GLSLANG_STAGE_ANYHIT;
+        break;
+    case VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:
+        glslangStage = GLSLANG_STAGE_CLOSESTHIT;
+        break;
+    case VK_SHADER_STAGE_MISS_BIT_KHR:
+        glslangStage = GLSLANG_STAGE_MISS;
+        break;
+    case VK_SHADER_STAGE_CALLABLE_BIT_KHR:
+        glslangStage = GLSLANG_STAGE_CALLABLE;
+        break;
+    case VK_SHADER_STAGE_TASK_BIT_EXT:
+        glslangStage = GLSLANG_STAGE_TASK;
+        break;
+    case VK_SHADER_STAGE_MESH_BIT_EXT:
+        glslangStage = GLSLANG_STAGE_MESH;
+        break;
+    }
+
     const glslang_input_t input = {
         .language = GLSLANG_SOURCE_GLSL,
-        .stage = stage,
+        .stage = glslangStage,
         .client = GLSLANG_CLIENT_VULKAN,
-        .client_version = targetVersion,
+        .client_version = glslangVersion,
         .target_language = GLSLANG_TARGET_SPV,
         .target_language_version = GLSLANG_TARGET_SPV_1_6,
         .code = pShaderSource,
@@ -2591,31 +2427,28 @@ void ygCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
     glslang_shader_t* shader = glslang_shader_create(&input);
 
     if (!glslang_shader_preprocess(shader, &input)) {
-        YG_ERROR("GLSL preprocessing failed %s\n%s\n%s", pPath,
-                 glslang_shader_get_info_log(shader),
+        YG_ERROR("GLSL preprocessing failed %s\n%s\n%s", pPath, glslang_shader_get_info_log(shader),
                  glslang_shader_get_info_debug_log(shader));
     }
 
     if (!glslang_shader_parse(shader, &input)) {
-        YG_ERROR("GLSL parsing failed %s\n%s\n%s", pPath,
-                 glslang_shader_get_info_log(shader),
-                 glslang_shader_get_info_debug_log(shader));
+        YG_ERROR("GLSL parsing failed %s\n%s\n%s\n%s", pPath, glslang_shader_get_info_log(shader),
+                 glslang_shader_get_info_debug_log(shader), glslang_shader_get_preprocessed_code(shader));
     }
 
     glslang_program_t* program = glslang_program_create();
     glslang_program_add_shader(program, shader);
 
-    if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT |
-                                           GLSLANG_MSG_VULKAN_RULES_BIT)) {
-        YG_ERROR("GLSL linking failed %s\n%s\n%s", pPath,
-                 glslang_program_get_info_log(program),
+    if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT)) {
+        YG_ERROR("GLSL linking failed %s\n%s\n%s", pPath, glslang_program_get_info_log(program),
                  glslang_program_get_info_debug_log(program));
     }
 
-    glslang_program_SPIRV_generate(program, stage);
+    glslang_program_SPIRV_generate(program, glslangStage);
 
-    size_t codeSize = glslang_program_SPIRV_get_size(program);
-    uint32_t* pCode = YG_MALLOC(codeSize * sizeof(uint32_t));
+    size_t codeSize = glslang_program_SPIRV_get_size(program) * sizeof(uint32_t);
+    uint32_t* pCode = YG_MALLOC(codeSize);
+    memset(pCode, 0, codeSize);
     glslang_program_SPIRV_get(program, pCode);
 
     const char* spirvMessages = glslang_program_SPIRV_get_messages(program);
@@ -2639,6 +2472,7 @@ void ygDestroyShader(YgShader* pShader)
     VK_LOAD(vkDestroyShaderEXT);
     XvkDestroyShaderEXT(ygDevice.device, pShader->shader, NULL);
 
+    YG_FREE(pShader->pCode);
     YG_FREE(pShader->pPath);
 
     YG_RESET(pShader);
@@ -2646,9 +2480,9 @@ void ygDestroyShader(YgShader* pShader)
 
 void ygBuildShader(YgShader* pShader)
 {
+    YG_INFO("Building shader: %s", pShader->pPath);
     VK_LOAD(vkCreateShadersEXT);
-    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, 1, &pShader->createInfo, NULL,
-                                 &pShader->shader));
+    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, 1, &pShader->createInfo, NULL, &pShader->shader));
 }
 
 void ygBuildLinkedShaders(YgShader* pVertexShader, YgShader* pFragmentShader)
@@ -2656,6 +2490,9 @@ void ygBuildLinkedShaders(YgShader* pVertexShader, YgShader* pFragmentShader)
     if (!pVertexShader || !pFragmentShader) {
         YG_ERROR("Both pVertexShader and pFragmentShader need to be specified");
     }
+
+    YG_INFO("Building shaders: %s", pVertexShader->pPath);
+    YG_INFO("                  %s", pFragmentShader->pPath);
 
     VkShaderCreateInfoEXT createInfos[] = {
         pVertexShader->createInfo,
@@ -2669,8 +2506,7 @@ void ygBuildLinkedShaders(YgShader* pVertexShader, YgShader* pFragmentShader)
     VkShaderEXT shaders[YG_ARRAY_LEN(createInfos)];
 
     VK_LOAD(vkCreateShadersEXT);
-    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, YG_ARRAY_LEN(createInfos),
-                                 createInfos, NULL, shaders));
+    VK_CHECK(XvkCreateShadersEXT(ygDevice.device, YG_ARRAY_LEN(createInfos), createInfos, NULL, shaders));
 
     pVertexShader->shader = shaders[0];
     pFragmentShader->shader = shaders[1];
@@ -2682,12 +2518,20 @@ void ygCmdBindShader(VkCommandBuffer cmd, const YgShader* pShader)
     XvkCmdBindShadersEXT(cmd, 1, &pShader->createInfo.stage, &pShader->shader);
 }
 
-void ygCmdSetDefaultStates(
-    VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
-    const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
-    uint32_t vertexAttributeDescriptionCount,
-    const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
+void ygCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+                           const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+                           uint32_t vertexAttributeDescriptionCount,
+                           const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
 {
+    VK_LOAD(vkCmdSetVertexInputEXT);
+    VK_LOAD(vkCmdSetRasterizationSamplesEXT);
+    VK_LOAD(vkCmdSetSampleMaskEXT);
+    VK_LOAD(vkCmdSetAlphaToCoverageEnableEXT);
+    VK_LOAD(vkCmdSetPolygonModeEXT);
+    VK_LOAD(vkCmdSetLogicOpEnableEXT);
+    VK_LOAD(vkCmdSetColorBlendEnableEXT);
+    VK_LOAD(vkCmdSetColorWriteMaskEXT);
+
     const VkViewport viewport = {
         .width = (float)ygSwapchain.extent.width,
         .height = (float)ygSwapchain.extent.height,
@@ -2699,17 +2543,16 @@ void ygCmdSetDefaultStates(
     vkCmdSetScissorWithCount(cmd, 1, &scissor);
     vkCmdSetRasterizerDiscardEnable(cmd, VK_FALSE);
 
-    vkCmdSetVertexInputEXT(
-        cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
-        vertexAttributeDescriptionCount, vertexAttributeDescriptions);
+    XvkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
+                            vertexAttributeDescriptionCount, vertexAttributeDescriptions);
     vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
 
     const VkSampleMask sampleMask = 0x1;
-    vkCmdSetRasterizationSamplesEXT(cmd, VK_SAMPLE_COUNT_1_BIT);
-    vkCmdSetSampleMaskEXT(cmd, VK_SAMPLE_COUNT_1_BIT, &sampleMask);
-    vkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
-    vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
+    XvkCmdSetRasterizationSamplesEXT(cmd, VK_SAMPLE_COUNT_1_BIT);
+    XvkCmdSetSampleMaskEXT(cmd, VK_SAMPLE_COUNT_1_BIT, &sampleMask);
+    XvkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
+    XvkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
     vkCmdSetCullMode(cmd, VK_FALSE);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
     vkCmdSetDepthTestEnable(cmd, VK_TRUE);
@@ -2720,11 +2563,12 @@ void ygCmdSetDefaultStates(
 
     const VkBool32 colorBlendEnable = VK_FALSE;
     const VkColorComponentFlags colorComponents =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_B_BIT |
-        VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_A_BIT;
-    vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
-    vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &colorBlendEnable);
-    vkCmdSetColorWriteMaskEXT(cmd, 0, 1, &colorComponents);
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_A_BIT;
+    XvkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
+    XvkCmdSetColorBlendEnableEXT(cmd, 0, 1, &colorBlendEnable);
+    XvkCmdSetColorWriteMaskEXT(cmd, 0, 1, &colorComponents);
+
+    vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
 }
 
 #endif

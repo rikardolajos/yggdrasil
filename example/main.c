@@ -1,4 +1,4 @@
-#define YGGDRASIL_STBI
+#define YGGDRASIL_USE_STB_IMAGE
 #define YGGDRASIL_IMPLEMENTATION
 #include "yggdrasil.h"
 
@@ -30,7 +30,7 @@ static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
     do {
         glfwGetFramebufferSize(pWindow, pWidth, pHeight);
         glfwWaitEvents();
-    } while (pWidth == 0 || pHeight == 0);
+    } while (*pWidth == 0 || *pHeight == 0);
 }
 
 static void createWindow()
@@ -42,7 +42,7 @@ static void createWindow()
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 
-    pWindow = glfwCreateWindow(1280, 720, "Hello Triangle", NULL, NULL);
+    pWindow = glfwCreateWindow(1280, 720, "Yggdrasil Example", NULL, NULL);
     if (!pWindow) {
         glfwTerminate();
         YG_ERROR("Failed to create GLFW window");
@@ -54,26 +54,27 @@ static void createWindow()
 static void createInstance()
 {
     uint32_t instanceExtensionCount;
-    const char** ppInstanceExtensions =
-        glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
+    const char** ppInstanceExtensions = glfwGetRequiredInstanceExtensions(&instanceExtensionCount);
 
-    ygCreateInstance(VK_API_VERSION_1_3, instanceExtensionCount,
-                     ppInstanceExtensions);
+    ygCreateInstance(VK_API_VERSION_1_3, instanceExtensionCount, ppInstanceExtensions);
 }
 
 static void createDevice(VkSurfaceKHR surface)
 {
-    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    const char* deviceExtensions[] = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+    };
 
-    VkPhysicalDeviceVulkan12Features vk12Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .descriptorIndexing = VK_TRUE,
-        .bufferDeviceAddress = VK_TRUE,
+    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .shaderObject = VK_TRUE,
     };
 
     VkPhysicalDeviceVulkan13Features vk13Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &vk12Features,
+        .pNext = &shaderObjectFeatures,
         .synchronization2 = VK_TRUE,
         .dynamicRendering = VK_TRUE,
     };
@@ -84,50 +85,44 @@ static void createDevice(VkSurfaceKHR surface)
         .pushDescriptor = VK_TRUE,
     };
 
-    VkPhysicalDeviceFeatures2 features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &vk14Features,
-    };
+    VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+                                          .pNext = &vk14Features,
+                                          .features = {
+                                              .samplerAnisotropy = VK_TRUE,
+                                          }};
 
-    ygCreateDevice(0, YG_ARRAY_LEN(deviceExtensions), deviceExtensions,
-                   &features, surface);
+    ygCreateDevice(0, YG_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
 }
 
-static void createAttachments(YgImage* pColorAttachment,
-                              YgImage* pDepthAttachment)
+static void createAttachments(YgImage* pColorAttachment, YgImage* pDepthAttachment)
 {
-    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
-                  VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM,
-                  VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1, VK_SAMPLE_COUNT_1_BIT,
+                  VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+                  VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
+    ygCreateImageView(pColorAttachment, VK_IMAGE_ASPECT_COLOR_BIT);
 
     VkFormat depthFormat = ygFindDepthFormat();
-    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1,
-                  VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL,
-                  VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    ygCreateImage(ygSwapchain.extent.width, ygSwapchain.extent.height, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat,
+                  VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pDepthAttachment);
+    ygCreateImageView(pDepthAttachment, VK_IMAGE_ASPECT_DEPTH_BIT);
 
     // Transition depth attachment for depth use
-    VkImageSubresourceRange depthSubresourceRange = {
-        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-        .baseMipLevel = 0,
-        .levelCount = 1,
-        .baseArrayLayer = 0,
-        .layerCount = 1};
-    if (depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT ||
-        depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) {
+    VkImageSubresourceRange depthSubresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                                                     .baseMipLevel = 0,
+                                                     .levelCount = 1,
+                                                     .baseArrayLayer = 0,
+                                                     .layerCount = 1};
+    if (depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT || depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) {
         depthSubresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
     }
     VkCommandBuffer cmd = ygCmdBegin();
-    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                   VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                   VK_IMAGE_LAYOUT_UNDEFINED,
-                   VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                   pDepthAttachment->image, &depthSubresourceRange);
+    ygImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                   VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+                   pDepthAttachment->image,
+                   &depthSubresourceRange);
     ygCmdEnd(cmd);
 }
 
@@ -147,12 +142,10 @@ static void createLayout(YgLayout* pLayout)
 
     uint32_t counts[] = {1, 1, 1};
 
-    ygCreateLayout(YG_ARRAY_LEN(types), types, stages, counts, 0, NULL,
-                   pLayout);
+    ygCreateLayout(YG_ARRAY_LEN(types), types, stages, counts, 0, NULL, pLayout);
 }
 
-static void createVertexAndIndexBuffers(YgBuffer* pVertexBuffer,
-                                        YgBuffer* pIndexBuffer)
+static void createVertexAndIndexBuffers(YgBuffer* pVertexBuffer, YgBuffer* pIndexBuffer)
 {
     Vertex vertices[] = {
         {.position = {-1.0f, -1.0f, 0.0f}, .textureCoord = {0.0f, 0.0f}},
@@ -165,14 +158,13 @@ static void createVertexAndIndexBuffers(YgBuffer* pVertexBuffer,
     size_t verticesSize = YG_ARRAY_LEN(vertices) * sizeof(Vertex);
     size_t indicesSize = YG_ARRAY_LEN(indices) * sizeof(uint32_t);
 
-    ygCreateBuffer(verticesSize,
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+    ygCreateBuffer(verticesSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pVertexBuffer);
-    ygCreateBuffer(indicesSize,
-                   VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pVertexBuffer);
+    ygCreateBuffer(indicesSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pIndexBuffer);
+
+    ygCopyBufferFromHost(pVertexBuffer, vertices, sizeof(vertices), 0);
+    ygCopyBufferFromHost(pIndexBuffer, indices, sizeof(indices), 0);
 }
 
 static void cmdSetRenderingStates(VkCommandBuffer cmd)
@@ -182,6 +174,7 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd)
         .binding = 0,
         .stride = sizeof(Vertex),
         .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        .divisor = 1,
     }};
 
     const VkVertexInputAttributeDescription2EXT vertexAttributeDescription[] = {
@@ -194,16 +187,15 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd)
         },
         {
             .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
-            .location = 0,
+            .location = 1,
             .binding = 0,
             .format = VK_FORMAT_R32G32_SFLOAT,
             .offset = offsetof(Vertex, textureCoord),
         },
     };
 
-    ygCmdSetDefaultStates(
-        cmd, YG_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
-        YG_ARRAY_LEN(vertexAttributeDescription), vertexAttributeDescription);
+    ygCmdSetDefaultStates(cmd, YG_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
+                          YG_ARRAY_LEN(vertexAttributeDescription), vertexAttributeDescription);
 }
 
 int main()
@@ -213,8 +205,7 @@ int main()
     createInstance();
 
     VkSurfaceKHR surface;
-    VK_CHECK(
-        glfwCreateWindowSurface(ygDevice.instance, pWindow, NULL, &surface));
+    VK_CHECK(glfwCreateWindowSurface(ygDevice.instance, pWindow, NULL, &surface));
 
     createDevice(surface);
 
@@ -232,48 +223,36 @@ int main()
 
     YgShader vertexShader;
     YgShader fragmentShader;
-    ygCreateShaderFromFileGLSL("shader.vert", VK_SHADER_STAGE_VERTEX_BIT,
-                               VK_SHADER_STAGE_FRAGMENT_BIT, &layout,
+    ygCreateShaderFromFileGLSL("shader.vert", VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, &layout,
                                &vertexShader);
-    ygCreateShaderFromFileGLSL("shader.frag", VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                               &layout, &vertexShader);
+    ygCreateShaderFromFileGLSL("shader.frag", VK_SHADER_STAGE_FRAGMENT_BIT, 0, &layout, &fragmentShader);
     ygBuildLinkedShaders(&vertexShader, &fragmentShader);
 
     YgBuffer cameraBuffer;
     ygCreateBuffer(sizeof(CameraMatrices), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                   &cameraBuffer);
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &cameraBuffer);
 
     CameraMatrices cameraMatrices = {
-        .view = mat4_lookat((vec3){0.0f, 0.0f, -5.0f}, (vec3){0.0f, 0.0f, 0.0f},
-                            (vec3){0.0f, 1.0f, 0.0f}),
-        .proj =
-            mat4_perspective(ygSwapchain.extent.width,
-                             ygSwapchain.extent.height, 0.01f, 100.0f, 60.0f),
+        .view = mat4_lookat((vec3){0.0f, 0.0f, 5.0f}, (vec3){0.0f, 0.0f, 0.0f}, (vec3){0.0f, 1.0f, 0.0f}),
+        .proj = mat4_perspective(ygSwapchain.extent.width, ygSwapchain.extent.height, 0.01f, 100.0f, 30.0f),
     };
 
-    ygCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices),
-                         0);
+    ygCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices), 0);
 
     YgBuffer modelBuffer;
     ygCreateBuffer(sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                   &modelBuffer);
+                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &modelBuffer);
     float angle = 0.0f;
     mat4* model = modelBuffer.pHostMap;
     *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
     YgTexture texture;
-    ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_SRGB,
-                            "texture.png", false, &texture);
+    ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_SRGB, "texture.png", false, &texture);
     YgSampler sampler;
-    ygCreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST,
-                    VK_SAMPLER_MIPMAP_MODE_LINEAR,
-                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    ygCreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_LINEAR,
+                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
                     VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, &sampler);
+    ygSetTextureSampler(&texture, &sampler);
 
     YgBuffer vertexBuffer;
     YgBuffer indexBuffer;
@@ -300,30 +279,35 @@ int main()
         // Start new frame
         VkCommandBuffer cmd = ygAcquireNextImage();
         ygTransitionForColorAttachment(cmd, &colorAttachment);
-        ygCmdBeginPass(
-            cmd, &pass,
-            (VkClearValue){.color = {{0.0f, 0.0f, 0.0f, 0.0f}},
-                           .depthStencil = {.depth = 1.0f, .stencil = 0}},
-            VK_ATTACHMENT_LOAD_OP_CLEAR);
+
+        VkClearValue clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
+        ygCmdBeginPass(cmd, &pass, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
 
         // Set rendering states
         cmdSetRenderingStates(cmd);
+        vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
 
         // Push descriptor
         VkWriteDescriptorSet writes[] = {
-            ygGetBufferDescriptor(&cameraBuffer, 0, 0, VK_WHOLE_SIZE),
-            ygGetBufferDescriptor(&modelBuffer, 0, 0, VK_WHOLE_SIZE),
-            ygGetTextureDescriptor(&texture, 2),
+            ygGetBufferDescriptor(&cameraBuffer, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE),
+            ygGetBufferDescriptor(&modelBuffer, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE),
+            ygGetTextureDescriptor(&texture, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         };
-        vkCmdPushDescriptorSet(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                               layout.pipelineLayout, 0, YG_ARRAY_LEN(writes),
-                               writes);
+        VK_LOAD(vkCmdPushDescriptorSetKHR);
+        XvkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipelineLayout, 0, YG_ARRAY_LEN(writes),
+                                   writes);
 
         // Bind shaders
         ygCmdBindShader(cmd, &vertexShader);
         ygCmdBindShader(cmd, &fragmentShader);
 
+        // Bind vertex and index buffers
+        VkDeviceSize vertexBufferOffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &vertexBufferOffset);
+        vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
         // Draw
+        vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
 
         // End and present frame
         ygCmdEndPass(cmd, &pass);

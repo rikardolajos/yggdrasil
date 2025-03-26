@@ -5,7 +5,7 @@ layout(set = 0, binding = 0) uniform CameraUniforms {
     mat4 proj;
 } camera;
 
-layout(set = 0, binding = 0) uniform MeshUniforms {
+layout(set = 0, binding = 1) uniform MeshUniforms {
     mat4 model;
 } mesh;
 

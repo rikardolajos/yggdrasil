@@ -28,7 +28,9 @@ link_libraries(${GLSLANG_LIB} ${SPIRV_LIB} ${SPIRV_OPT_LIB} ${GLSLANG_DEFAULT_RE
 
 add_subdirectory(submodules)
 include_directories(submodules/glfw/include)
+include_directories(submodules/stb)
+include_directories(submodules/vecmat)
 link_libraries(glfw)
 
 include_directories(.)
-add_subdirectory(examples)
+add_subdirectory(example)
