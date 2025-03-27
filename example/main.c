@@ -247,7 +247,7 @@ int main()
     *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
     YgTexture texture;
-    ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_SRGB, "texture.png", false, &texture);
+    ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_UNORM, "texture.png", false, &texture);
     YgSampler sampler;
     ygCreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_LINEAR,
                     VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
