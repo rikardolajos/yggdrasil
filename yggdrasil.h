@@ -238,8 +238,8 @@ typedef struct YgSwapchain {
     uint32_t imageIndex;
 
     VkCommandBuffer* commandBuffers;
-    VkSemaphore* imageAvailableSemaphores;
     VkSemaphore* renderFinishedSemaphores;
+    VkSemaphore* inFlightSemaphores;
     VkFence* inFlightFences;
     uint32_t framesInFlight;
     uint32_t inFlightIndex;
@@ -1466,11 +1466,11 @@ static void createSyncObjects()
         .commandBufferCount = ygSwapchain.framesInFlight,
     };
 
-    ygSwapchain.commandBuffers = YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.commandBuffers);
-    ygSwapchain.imageAvailableSemaphores =
-        YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.imageAvailableSemaphores);
     ygSwapchain.renderFinishedSemaphores =
-        YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.renderFinishedSemaphores);
+        YG_MALLOC(ygSwapchain.imageCount * sizeof *ygSwapchain.renderFinishedSemaphores);
+    ygSwapchain.commandBuffers = YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.commandBuffers);
+    ygSwapchain.inFlightSemaphores =
+        YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.inFlightSemaphores);
     ygSwapchain.inFlightFences = YG_MALLOC(ygSwapchain.framesInFlight * sizeof *ygSwapchain.inFlightFences);
 
     VK_CHECK(vkAllocateCommandBuffers(ygDevice.device, &ai, ygSwapchain.commandBuffers));
@@ -1484,9 +1484,12 @@ static void createSyncObjects()
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
     };
 
-    for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
-        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL, &ygSwapchain.imageAvailableSemaphores[i]));
+    for (uint32_t i = 0; i < ygSwapchain.imageCount; i++) {
         VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL, &ygSwapchain.renderFinishedSemaphores[i]));
+    }
+
+    for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
+        VK_CHECK(vkCreateSemaphore(ygDevice.device, &sci, NULL, &ygSwapchain.inFlightSemaphores[i]));
         VK_CHECK(vkCreateFence(ygDevice.device, &fci, NULL, &ygSwapchain.inFlightFences[i]));
     }
 }
@@ -1497,15 +1500,18 @@ static void destroySyncObjects()
 
     vkFreeCommandBuffers(ygDevice.device, ygDevice.commandPool, ygSwapchain.framesInFlight, ygSwapchain.commandBuffers);
 
-    for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
-        vkDestroySemaphore(ygDevice.device, ygSwapchain.imageAvailableSemaphores[i], NULL);
+    for (uint32_t i = 0; i < ygSwapchain.imageCount; i++) {
         vkDestroySemaphore(ygDevice.device, ygSwapchain.renderFinishedSemaphores[i], NULL);
+    }
+
+    for (uint32_t i = 0; i < ygSwapchain.framesInFlight; i++) {
+        vkDestroySemaphore(ygDevice.device, ygSwapchain.inFlightSemaphores[i], NULL);
         vkDestroyFence(ygDevice.device, ygSwapchain.inFlightFences[i], NULL);
     }
 
-    YG_FREE(ygSwapchain.commandBuffers);
-    YG_FREE(ygSwapchain.imageAvailableSemaphores);
     YG_FREE(ygSwapchain.renderFinishedSemaphores);
+    YG_FREE(ygSwapchain.commandBuffers);
+    YG_FREE(ygSwapchain.inFlightSemaphores);
     YG_FREE(ygSwapchain.inFlightFences);
 }
 
@@ -1573,7 +1579,7 @@ VkCommandBuffer ygAcquireNextImage()
 
     // Acquire index of next image in the swapchain
     VkResult result = vkAcquireNextImageKHR(ygDevice.device, ygSwapchain.swapchain, UINT64_MAX,
-                                            ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex], NULL,
+                                            ygSwapchain.inFlightSemaphores[ygSwapchain.inFlightIndex], NULL,
                                             &ygSwapchain.imageIndex);
 
     // Check if swapchain needs to be reconstructed
@@ -1648,12 +1654,12 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &ygSwapchain.imageAvailableSemaphores[ygSwapchain.inFlightIndex],
+        .pWaitSemaphores = &ygSwapchain.inFlightSemaphores[ygSwapchain.inFlightIndex],
         .pWaitDstStageMask = &waitStage,
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
+        .pSignalSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.imageIndex],
     };
 
     VK_CHECK(vkQueueSubmit(ygDevice.queue, 1, &si, ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
@@ -1661,7 +1667,7 @@ void ygPresent(VkCommandBuffer cmd, YgImage* pImage)
     VkPresentInfoKHR pi = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.inFlightIndex],
+        .pWaitSemaphores = &ygSwapchain.renderFinishedSemaphores[ygSwapchain.imageIndex],
         .swapchainCount = 1,
         .pSwapchains = &ygSwapchain.swapchain,
         .pImageIndices = &ygSwapchain.imageIndex,
