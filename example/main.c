@@ -79,14 +79,8 @@ static void createDevice(VkSurfaceKHR surface)
         .dynamicRendering = VK_TRUE,
     };
 
-    VkPhysicalDeviceVulkan14Features vk14Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-        .pNext = &vk13Features,
-        .pushDescriptor = VK_TRUE,
-    };
-
     VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-                                          .pNext = &vk14Features,
+                                          .pNext = &vk13Features,
                                           .features = {
                                               .samplerAnisotropy = VK_TRUE,
                                           }};
