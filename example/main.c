@@ -77,6 +77,7 @@ static void createDevice(VkSurfaceKHR surface)
         .pNext = &shaderObjectFeatures,
         .synchronization2 = VK_TRUE,
         .dynamicRendering = VK_TRUE,
+        .shaderDemoteToHelperInvocation = VK_TRUE,
     };
 
     VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -209,8 +210,8 @@ int main()
     YgImage depthAttachment;
     createAttachments(&colorAttachment, &depthAttachment);
 
-    YgPass pass;
-    ygCreatePass(1, &colorAttachment, &depthAttachment, NULL, &pass);
+    YgAttachment attachment;
+    ygCreateAttachment(1, &colorAttachment, &depthAttachment, NULL, &attachment);
 
     YgLayout layout;
     createLayout(&layout);
@@ -242,11 +243,6 @@ int main()
 
     YgTexture texture;
     ygCreateTextureFromFile(YG_TEXTURE_2D, VK_FORMAT_R8G8B8A8_UNORM, "texture.png", false, &texture);
-    YgSampler sampler;
-    ygCreateSampler(VK_FILTER_NEAREST, VK_FILTER_NEAREST, VK_SAMPLER_MIPMAP_MODE_LINEAR,
-                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-                    VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, &sampler);
-    ygSetTextureSampler(&texture, &sampler);
 
     YgBuffer vertexBuffer;
     YgBuffer indexBuffer;
@@ -267,7 +263,7 @@ int main()
             ygDestroyImage(&colorAttachment);
             ygDestroyImage(&depthAttachment);
             createAttachments(&colorAttachment, &depthAttachment);
-            ygRecreatePass(&pass, 1, &colorAttachment, &depthAttachment, NULL);
+            ygRecreateAttachment(&attachment, 1, &colorAttachment, &depthAttachment, NULL);
         }
 
         // Start new frame
@@ -275,7 +271,7 @@ int main()
         ygTransitionForColorAttachment(cmd, &colorAttachment);
 
         VkClearValue clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
-        ygCmdBeginPass(cmd, &pass, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
+        ygCmdBeginRendering(cmd, &attachment, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
 
         // Set rendering states
         cmdSetRenderingStates(cmd);
@@ -304,7 +300,7 @@ int main()
         vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
 
         // End and present frame
-        ygCmdEndPass(cmd, &pass);
+        ygCmdEndRendering(cmd, &attachment);
         ygTransitionForBlitting(cmd, &colorAttachment);
         ygPresent(cmd, &colorAttachment);
 
@@ -314,7 +310,6 @@ int main()
     ygDestroyBuffer(&vertexBuffer);
     ygDestroyBuffer(&indexBuffer);
 
-    ygDestroySampler(&sampler);
     ygDestroyTexture(&texture);
 
     ygDestroyBuffer(&cameraBuffer);
@@ -328,7 +323,7 @@ int main()
     ygDestroyImage(&colorAttachment);
     ygDestroyImage(&depthAttachment);
 
-    ygDestroyPass(&pass);
+    ygDestroyAttachment(&attachment);
 
     ygDestroySwapchain();
     ygDestroyDevice();
