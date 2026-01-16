@@ -1596,11 +1596,13 @@ void ygWaitForFence()
     // Wait for the current frame to not be in flight
     VK_CHECK(vkWaitForFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex], VK_TRUE,
                              UINT64_MAX));
-    VK_CHECK(vkResetFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
 }
 
 VkCommandBuffer ygAcquireNextImage()
 {
+    ygWaitForFence();
+    VK_CHECK(vkResetFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
+
     // Acquire index of next image in the swapchain
     VkResult result =
         vkAcquireNextImageKHR(ygDevice.device, ygSwapchain.swapchain, UINT64_MAX,
