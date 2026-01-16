@@ -211,9 +211,10 @@ typedef struct YgDevice {
 
 // Swapchain abstracts the handling of swapchain images and frames in flight.
 // The Yggdrasil swapchain is monolithic and is setup through
-// ygCreateSwapchain(). Use ygAcquiteNextImage() and ygPresent() to acquire and
-// present images from the swapchain respectively. The swapchain can be
-// recreated with ygRecreateSwapchain() if the framebuffer size changed. The
+// ygCreateSwapchain(). Use ygAcquireNextImage() and ygPresent() to acquire and
+// present images from the swapchain respectively. Before updating shared
+// resources, call ygWaitForFence(). The swapchain can be recreated with
+// ygRecreateSwapchain() if the framebuffer size changed. The
 // framebufferSizeCallback() function pointer will be used to retrieve the new
 // framebuffer size. Release resources with ygDestroySwapchain().
 typedef struct YgSwapchain {
@@ -412,6 +413,12 @@ void ygDestroySwapchain();
 /// framebuffer size is retrieved through framebufferSizeCallback().
 /// </summary>
 void ygRecreateSwapchain();
+
+/// <summary>
+/// Wait for the fence of the current frame in flight to be signaled.
+/// Call this before accessing any shared resources.
+/// </summary>
+void ygWaitForFence();
 
 /// <summary>
 /// Acquire a new image from the swapchain. This call will block until an image
@@ -1579,13 +1586,16 @@ void ygRecreateSwapchain()
     ygSwapchain.recreated = true;
 }
 
-VkCommandBuffer ygAcquireNextImage()
+void ygWaitForFence()
 {
     // Wait for the current frame to not be in flight
     VK_CHECK(vkWaitForFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex], VK_TRUE,
                              UINT64_MAX));
     VK_CHECK(vkResetFences(ygDevice.device, 1, &ygSwapchain.inFlightFences[ygSwapchain.inFlightIndex]));
+}
 
+VkCommandBuffer ygAcquireNextImage()
+{
     // Acquire index of next image in the swapchain
     VkResult result =
         vkAcquireNextImageKHR(ygDevice.device, ygSwapchain.swapchain, UINT64_MAX,
