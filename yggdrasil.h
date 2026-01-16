@@ -221,7 +221,6 @@ typedef struct YgSwapchain {
     VkSwapchainKHR swapchain;
     VkFormat format;
     VkExtent2D extent;
-    VkCompositeAlphaFlagBitsKHR compositeAlpha;
     bool recreated;
 
     void (*framebufferSizeCallback)(uint32_t*, uint32_t*);
@@ -401,10 +400,8 @@ VkSampleCountFlagBits ygGetDeviceSampleCount();
 /// ygSwapchain.
 /// </summary>
 /// <param name="framesInFlight">Number of frames in flight to use</param>
-/// <param name="compositeAlpha">Which alpha composite to use</param>
 /// <param name="framebufferSizeCallback">Callback function where the current framebuffer size can be retrieved</param>
-void ygCreateSwapchain(uint32_t framesInFlight, VkCompositeAlphaFlagBitsKHR compositeAlpha,
-                       void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
+void ygCreateSwapchain(uint32_t framesInFlight, void (*framebufferSizeCallback)(uint32_t*, uint32_t*));
 
 /// <summary>
 /// Release the resources for the swapchain.
@@ -1422,7 +1419,7 @@ static void createSwapchain()
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform = ygSwapchain.supportDetails.capabilities.currentTransform,
-        .compositeAlpha = ygSwapchain.compositeAlpha,
+        .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = presentMode,
         .clipped = VK_TRUE,
         .oldSwapchain = VK_NULL_HANDLE,
@@ -1532,8 +1529,7 @@ static void destroySyncObjects()
     YG_FREE(ygSwapchain.inFlightFences);
 }
 
-void ygCreateSwapchain(uint32_t framesInFlight, VkCompositeAlphaFlagBitsKHR compositeAlpha,
-                       void (*framebufferSizeCallback)(uint32_t*, uint32_t*))
+void ygCreateSwapchain(uint32_t framesInFlight, void (*framebufferSizeCallback)(uint32_t*, uint32_t*))
 {
     YG_RESET(&ygSwapchain);
 
@@ -1547,7 +1543,6 @@ void ygCreateSwapchain(uint32_t framesInFlight, VkCompositeAlphaFlagBitsKHR comp
 
     ygSwapchain.framesInFlight = framesInFlight;
     ygSwapchain.framebufferSizeCallback = framebufferSizeCallback;
-    ygSwapchain.compositeAlpha = compositeAlpha;
 
     querySupport();
     createSwapchain();

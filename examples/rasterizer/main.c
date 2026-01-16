@@ -203,7 +203,7 @@ int main()
 
     createDevice(surface);
 
-    ygCreateSwapchain(1, VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, framebufferSizeCallback);
+    ygCreateSwapchain(2, framebufferSizeCallback);
 
     YgImage colorAttachment;
     YgImage depthAttachment;
