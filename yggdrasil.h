@@ -364,7 +364,7 @@ extern YgSwapchain ygSwapchain;
 /// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or VK_MAKE_API_VERSION()</param>
 /// <param name="instanceExtensionCount">Number of instance extensions</param>
 /// <param name="ppInstanceExtensions">List of instance extensions to use</param>
-void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions);
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char* const* ppInstanceExtensions);
 
 /// <summary>
 /// Release resources for the instance.
@@ -1017,14 +1017,14 @@ static void createDebugMessenger()
 }
 #endif
 
-void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions)
+void ygCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char* const* ppInstanceExtensions)
 {
     ygDevice.apiVersion = apiVersion;
 
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pEngineName = "Yggdrasil",
-        .engineVersion = VK_MAKE_API_VERSION(0, 0, 0, 1),
+        .engineVersion = VK_MAKE_API_VERSION(1, 0, 0, 0),
         .apiVersion = apiVersion,
     };
 
@@ -2169,7 +2169,7 @@ void ygSetTextureAddressMode(YgTexture* pTexture, VkSamplerAddressMode modeU, Vk
 }
 
 static createAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
-                        YgImage* pDepthAttachment, YgImage* pResolveAttachment)
+                           YgImage* pDepthAttachment, YgImage* pResolveAttachment)
 {
     *pAttachmentSet = (YgAttachmentSet){
         .pRenderingAttachmentInfos = YG_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
@@ -2186,9 +2186,10 @@ static createAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttach
             .imageView = pAttachmentSet->pColorAttachments[i].imageView,
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             .resolveMode = pAttachmentSet->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
-            .resolveImageView = pAttachmentSet->pResolveAttachment ? pAttachmentSet->pResolveAttachment->imageView : NULL,
-            .resolveImageLayout =
-                pAttachmentSet->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .resolveImageView =
+                pAttachmentSet->pResolveAttachment ? pAttachmentSet->pResolveAttachment->imageView : NULL,
+            .resolveImageLayout = pAttachmentSet->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                                     : VK_IMAGE_LAYOUT_UNDEFINED,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         };
         pAttachmentSet->pFormats[i] = pAttachmentSet->pColorAttachments[i].format;
@@ -2203,7 +2204,7 @@ static createAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttach
 }
 
 void ygCreateAttachmentSet(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
-                        YgImage* pResolveAttachment, YgAttachmentSet* pAttachmentSet)
+                           YgImage* pResolveAttachment, YgAttachmentSet* pAttachmentSet)
 {
     YG_RESET(pAttachmentSet);
 
@@ -2219,7 +2220,7 @@ void ygDestroyAttachmentSet(YgAttachmentSet* pAttachmentSet)
 }
 
 void ygRecreateAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
-                          YgImage* pDepthAttachment, YgImage* pResolveAttachment)
+                             YgImage* pDepthAttachment, YgImage* pResolveAttachment)
 {
     YG_FREE(pAttachmentSet->pRenderingAttachmentInfos);
     YG_FREE(pAttachmentSet->pFormats);
