@@ -33,4 +33,5 @@ include_directories(submodules/vecmat)
 link_libraries(glfw)
 
 include_directories(.)
-add_subdirectory(example)
+add_subdirectory(examples/rasterizer)
+add_subdirectory(examples/raytracer)
