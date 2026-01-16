@@ -305,14 +305,15 @@ typedef struct YgTexture {
     VkSamplerMipmapMode mipmapMode;
 } YgTexture;
 
-// Attachment keeps track of color and depth attachments and prepares for
+// Attachment sets keeps track of color and depth attachments and prepares for
 // dynamic rendering. Create a new pass attachment description with
-// ygCreateAttachment(). Before rendering with the attachment call
+// ygCreateAttachmentSet(). Before rendering with the attachment call
 // ygBeginRendering() and call ygEndRendering() when done. If the attachment
 // changes (resolution change for instance), it should be recreated.
-// ygRecreateAttachment() can be used, or alternatively ygDestroyAttachment()
-// and ygCreateAttachment(). Release resources with ygDestroyAttachment().
-typedef struct YgAttachment {
+// ygRecreateAttachmentSet() can be used, or alternatively
+// ygDestroyAttachmentSet() and ygCreateAttachmentSet(). Release resources with
+// ygDestroyAttachmentSet().
+typedef struct YgAttachmentSet {
     VkPipelineRenderingCreateInfo pipelineRenderingCreateInfo;
     VkRenderingAttachmentInfo* pRenderingAttachmentInfos;
     VkFormat* pFormats;
@@ -320,7 +321,7 @@ typedef struct YgAttachment {
     YgImage* pColorAttachments;
     YgImage* pDepthAttachment;
     YgImage* pResolveAttachment;
-} YgAttachment;
+} YgAttachmentSet;
 
 // Layout abstracts the use of descriptor set layouts and pipeline layouts.
 // Create a new layout with ygCreateLayout(). Only one descriptor set is
@@ -565,50 +566,50 @@ void ygSetTextureAddressMode(YgTexture* pTexture, VkSamplerAddressMode modeU, Vk
                              VkSamplerAddressMode modeW);
 
 /// <summary>
-/// Create a new pass.
+/// Create a new attachment set.
 /// </summary>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
 /// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
 /// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
-/// <param name="pAttachment">Where the created pass will be stored</param>
-void ygCreateAttachment(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
-                        YgImage* pResolveAttachment, YgAttachment* pAttachment);
+/// <param name="pAttachmentSet">Where the created attachment set will be stored</param>
+void ygCreateAttachmentSet(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
+                           YgImage* pResolveAttachment, YgAttachmentSet* pAttachmentSet);
 
 /// <summary>
-/// Release resource for a pass.
+/// Release resource for an attachment set.
 /// </summary>
-/// <param name="pAttachment">Pass to destroy</param>
-void ygDestroyAttachment(YgAttachment* pAttachment);
+/// <param name="pAttachmentSet">Attachment set to destroy</param>
+void ygDestroyAttachmentSet(YgAttachmentSet* pAttachmentSet);
 
 /// <summary>
-/// Recreate a pass if attachments changed. Same as calling ygDestroyAttachment()
-/// followed by ygCreateAttachment().
+/// Recreate an attachment set if attachments changed. Same as calling ygDestroyAttachmentSet()
+/// followed by ygCreateAttachmentSet().
 /// </summary>
-/// <param name="pAttachment">Pass to recreate</param>
+/// <param name="pAttachmentSet">Pass to recreate</param>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
 /// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
 /// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
-void ygRecreateAttachment(YgAttachment* pAttachment, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
-                          YgImage* pDepthAttachment, YgImage* pResolveAttachment);
+void ygRecreateAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
+                             YgImage* pDepthAttachment, YgImage* pResolveAttachment);
 
 /// <summary>
-/// Begin dynamic rendering using a pass.
+/// Begin dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachment">Pass to use</param>
 /// <param name="clearValue">Clear value for attachments</param>
 /// <param name="loadOp">Load operation for attachments</param>
-void ygCmdBeginPass(VkCommandBuffer cmd, const YgAttachment* pAttachment, VkClearValue clearValue,
-                    VkAttachmentLoadOp loadOp);
+void ygCmdBeginRendering(VkCommandBuffer cmd, const YgAttachmentSet* pAttachmentSet, VkClearValue clearValue,
+                         VkAttachmentLoadOp loadOp);
 
 /// <summary>
-/// End dynamic rendering using a pass.
+/// End dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachment">Pass to use</param>
-void ygCmdEndPass(VkCommandBuffer cmd, const YgAttachment* pAttachment);
+void ygCmdEndRendering(VkCommandBuffer cmd, const YgAttachmentSet* pAttachmentSet);
 
 /// <summary>
 /// Create a new layout.
@@ -2167,10 +2168,10 @@ void ygSetTextureAddressMode(YgTexture* pTexture, VkSamplerAddressMode modeU, Vk
     createSampler(pTexture);
 }
 
-static createAttachment(YgAttachment* pAttachment, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
+static createAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
                         YgImage* pDepthAttachment, YgImage* pResolveAttachment)
 {
-    *pAttachment = (YgAttachment){
+    *pAttachmentSet = (YgAttachmentSet){
         .pRenderingAttachmentInfos = YG_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
         .pFormats = YG_MALLOC(colorAttachmentCount * sizeof(VkFormat)),
         .pColorAttachments = pColorAttachments,
@@ -2180,64 +2181,64 @@ static createAttachment(YgAttachment* pAttachment, uint32_t colorAttachmentCount
     };
 
     for (uint32_t i = 0; i < colorAttachmentCount; i++) {
-        pAttachment->pRenderingAttachmentInfos[i] = (VkRenderingAttachmentInfo){
+        pAttachmentSet->pRenderingAttachmentInfos[i] = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachment->pColorAttachments[i].imageView,
+            .imageView = pAttachmentSet->pColorAttachments[i].imageView,
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .resolveMode = pAttachment->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
-            .resolveImageView = pAttachment->pResolveAttachment ? pAttachment->pResolveAttachment->imageView : NULL,
+            .resolveMode = pAttachmentSet->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+            .resolveImageView = pAttachmentSet->pResolveAttachment ? pAttachmentSet->pResolveAttachment->imageView : NULL,
             .resolveImageLayout =
-                pAttachment->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+                pAttachmentSet->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         };
-        pAttachment->pFormats[i] = pAttachment->pColorAttachments[i].format;
+        pAttachmentSet->pFormats[i] = pAttachmentSet->pColorAttachments[i].format;
     }
 
-    pAttachment->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
+    pAttachmentSet->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = colorAttachmentCount,
-        .pColorAttachmentFormats = pAttachment->pFormats,
+        .pColorAttachmentFormats = pAttachmentSet->pFormats,
         .depthAttachmentFormat = pDepthAttachment->format,
     };
 }
 
-void ygCreateAttachment(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
-                        YgImage* pResolveAttachment, YgAttachment* pAttachment)
+void ygCreateAttachmentSet(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
+                        YgImage* pResolveAttachment, YgAttachmentSet* pAttachmentSet)
 {
-    YG_RESET(pAttachment);
+    YG_RESET(pAttachmentSet);
 
-    createAttachment(pAttachment, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
+    createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void ygDestroyAttachment(YgAttachment* pAttachment)
+void ygDestroyAttachmentSet(YgAttachmentSet* pAttachmentSet)
 {
-    YG_FREE(pAttachment->pRenderingAttachmentInfos);
-    YG_FREE(pAttachment->pFormats);
+    YG_FREE(pAttachmentSet->pRenderingAttachmentInfos);
+    YG_FREE(pAttachmentSet->pFormats);
 
-    YG_RESET(pAttachment);
+    YG_RESET(pAttachmentSet);
 }
 
-void ygRecreateAttachment(YgAttachment* pAttachment, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
+void ygRecreateAttachmentSet(YgAttachmentSet* pAttachmentSet, uint32_t colorAttachmentCount, YgImage* pColorAttachments,
                           YgImage* pDepthAttachment, YgImage* pResolveAttachment)
 {
-    YG_FREE(pAttachment->pRenderingAttachmentInfos);
-    YG_FREE(pAttachment->pFormats);
-    createAttachment(pAttachment, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
+    YG_FREE(pAttachmentSet->pRenderingAttachmentInfos);
+    YG_FREE(pAttachmentSet->pFormats);
+    createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void ygCmdBeginRendering(VkCommandBuffer cmd, const YgAttachment* pAttachment, VkClearValue clearValue,
+void ygCmdBeginRendering(VkCommandBuffer cmd, const YgAttachmentSet* pAttachmentSet, VkClearValue clearValue,
                          VkAttachmentLoadOp loadOp)
 {
-    for (uint32_t i = 0; i < pAttachment->colorAttachmentCount; i++) {
-        pAttachment->pRenderingAttachmentInfos[i].clearValue = clearValue;
-        pAttachment->pRenderingAttachmentInfos[i].loadOp = loadOp;
+    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
+        pAttachmentSet->pRenderingAttachmentInfos[i].clearValue = clearValue;
+        pAttachmentSet->pRenderingAttachmentInfos[i].loadOp = loadOp;
     }
 
     VkRenderingAttachmentInfo depthAttachmentInfo;
-    if (pAttachment->pDepthAttachment) {
+    if (pAttachmentSet->pDepthAttachment) {
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachment->pDepthAttachment->imageView,
+            .imageView = pAttachmentSet->pDepthAttachment->imageView,
             .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -2246,26 +2247,26 @@ void ygCmdBeginRendering(VkCommandBuffer cmd, const YgAttachment* pAttachment, V
     }
 
     VkExtent2D extent = {
-        .width = pAttachment->pColorAttachments[0].width,
-        .height = pAttachment->pColorAttachments[0].height,
+        .width = pAttachmentSet->pColorAttachments[0].width,
+        .height = pAttachmentSet->pColorAttachments[0].height,
     };
 
     VkRenderingInfo renderingInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = {.offset = {0, 0}, .extent = extent},
         .layerCount = 1,
-        .colorAttachmentCount = pAttachment->colorAttachmentCount,
-        .pColorAttachments = pAttachment->pRenderingAttachmentInfos,
-        .pDepthAttachment = pAttachment->pDepthAttachment ? &depthAttachmentInfo : NULL,
+        .colorAttachmentCount = pAttachmentSet->colorAttachmentCount,
+        .pColorAttachments = pAttachmentSet->pRenderingAttachmentInfos,
+        .pDepthAttachment = pAttachmentSet->pDepthAttachment ? &depthAttachmentInfo : NULL,
         .pStencilAttachment = NULL,
     };
 
     vkCmdBeginRendering(cmd, &renderingInfo);
 }
 
-void ygCmdEndRendering(VkCommandBuffer cmd, const YgAttachment* pAttachment)
+void ygCmdEndRendering(VkCommandBuffer cmd, const YgAttachmentSet* pAttachmentSet)
 {
-    YG_UNUSED(pAttachment);
+    YG_UNUSED(pAttachmentSet);
     vkCmdEndRendering(cmd);
 }
 
