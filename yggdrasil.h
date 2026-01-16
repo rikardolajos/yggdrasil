@@ -221,6 +221,7 @@ typedef struct YgSwapchain {
     VkSwapchainKHR swapchain;
     VkFormat format;
     VkExtent2D extent;
+    VkCompositeAlphaFlagBitsKHR compositeAlpha;
     bool recreated;
 
     void (*framebufferSizeCallback)(uint32_t*, uint32_t*);
@@ -1388,7 +1389,7 @@ static VkExtent2D chooseExtent(const VkSurfaceCapabilitiesKHR* capabilities, uin
     }
 }
 
-static void createSwapchain(VkCompositeAlphaFlagBitsKHR compositeAlpha)
+static void createSwapchain()
 {
     uint32_t width;
     uint32_t height;
@@ -1421,7 +1422,7 @@ static void createSwapchain(VkCompositeAlphaFlagBitsKHR compositeAlpha)
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
                       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform = ygSwapchain.supportDetails.capabilities.currentTransform,
-        .compositeAlpha = compositeAlpha,
+        .compositeAlpha = ygSwapchain.compositeAlpha,
         .presentMode = presentMode,
         .clipped = VK_TRUE,
         .oldSwapchain = VK_NULL_HANDLE,
@@ -1546,9 +1547,10 @@ void ygCreateSwapchain(uint32_t framesInFlight, VkCompositeAlphaFlagBitsKHR comp
 
     ygSwapchain.framesInFlight = framesInFlight;
     ygSwapchain.framebufferSizeCallback = framebufferSizeCallback;
+    ygSwapchain.compositeAlpha = compositeAlpha;
 
     querySupport();
-    createSwapchain(compositeAlpha);
+    createSwapchain();
     createSyncObjects();
 }
 
