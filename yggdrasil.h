@@ -1353,7 +1353,7 @@ static VkPresentModeKHR choosePresentMode(uint32_t availablePresentModeCount,
                                           const VkPresentModeKHR* availablePresentModes, bool vsync)
 {
     if (vsync) {
-        return VK_PRESENT_MODE_FIFO_KHR;
+        return VK_PRESENT_MODE_MAILBOX_KHR;
     }
 
     for (uint32_t i = 0; i < availablePresentModeCount; i++) {
