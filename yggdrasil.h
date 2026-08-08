@@ -2210,8 +2210,8 @@ static createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCoun
     };
 }
 
-void ygCreateAttachment(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
-                        YgImage* pResolveAttachment, YgAttachment* pAttachment)
+void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachments, GfxImage* pDepthAttachment,
+                        GfxImage* pResolveAttachment, GfxAttachment* pAttachment)
 {
     GFX_RESET(pAttachment);
 
