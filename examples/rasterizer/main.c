@@ -253,6 +253,9 @@ int main()
         delta = (float)glfwGetTime();
         glfwSetTime(0.0);
 
+        // Wait for shared resources to be available
+        ygWaitForFence();
+
         // Rotate model
         angle += delta;
         *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});

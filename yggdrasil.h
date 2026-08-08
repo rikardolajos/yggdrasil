@@ -305,7 +305,7 @@ typedef struct GfxTexture {
     VkSamplerMipmapMode mipmapMode;
 } GfxTexture;
 
-// Attachment keeps track of color and depth attachments and prepares for
+// Attachment sets keeps track of color and depth attachments and prepares for
 // dynamic rendering. Create a new pass attachment description with
 // gfxCreateAttachment(). Before rendering with the attachment call
 // gfxBeginRendering() and call gfxEndRendering() when done. If the attachment
@@ -411,6 +411,12 @@ void gfxDestroySwapchain();
 /// framebuffer size is retrieved through framebufferSizeCallback().
 /// </summary>
 void gfxRecreateSwapchain();
+
+/// <summary>
+/// Wait for the fence of the current frame in flight to be signaled.
+/// Call this before accessing any shared resources.
+/// </summary>
+void ygWaitForFence();
 
 /// <summary>
 /// Acquire a new image from the swapchain. This call will block until an image
@@ -565,7 +571,7 @@ void gfxSetTextureAddressMode(GfxTexture* pTexture, VkSamplerAddressMode modeU, 
                               VkSamplerAddressMode modeW);
 
 /// <summary>
-/// Create a new pass.
+/// Create a new attachment set.
 /// </summary>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
@@ -576,7 +582,7 @@ void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachme
                          GfxImage* pResolveAttachment, GfxAttachment* pAttachment);
 
 /// <summary>
-/// Release resource for a pass.
+/// Release resource for an attachment set.
 /// </summary>
 /// <param name="pAttachment">Pass to destroy</param>
 void gfxDestroyAttachment(GfxAttachment* pAttachment);
@@ -585,7 +591,7 @@ void gfxDestroyAttachment(GfxAttachment* pAttachment);
 /// Recreate a pass if attachments changed. Same as calling gfxDestroyAttachment()
 /// followed by gfxCreateAttachment().
 /// </summary>
-/// <param name="pAttachment">Pass to recreate</param>
+/// <param name="pAttachmentSet">Pass to recreate</param>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
 /// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
@@ -594,7 +600,7 @@ void gfxRecreateAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentC
                            GfxImage* pDepthAttachment, GfxImage* pResolveAttachment);
 
 /// <summary>
-/// Begin dynamic rendering using a pass.
+/// Begin dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachment">Pass to use</param>
@@ -604,7 +610,7 @@ void gfxCmdBeginPass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkCl
                      VkAttachmentLoadOp loadOp);
 
 /// <summary>
-/// End dynamic rendering using a pass.
+/// End dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachment">Pass to use</param>
@@ -1346,7 +1352,7 @@ static VkPresentModeKHR choosePresentMode(uint32_t availablePresentModeCount,
                                           const VkPresentModeKHR* availablePresentModes, bool vsync)
 {
     if (vsync) {
-        return VK_PRESENT_MODE_FIFO_KHR;
+        return VK_PRESENT_MODE_MAILBOX_KHR;
     }
 
     for (uint32_t i = 0; i < availablePresentModeCount; i++) {
@@ -2182,33 +2188,34 @@ static createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCoun
     };
 
     for (uint32_t i = 0; i < colorAttachmentCount; i++) {
-        pAttachment->pRenderingAttachmentInfos[i] = (VkRenderingAttachmentInfo){
+        pAttachmentSet->pRenderingAttachmentInfos[i] = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachment->pColorAttachments[i].imageView,
+            .imageView = pAttachmentSet->pColorAttachments[i].imageView,
             .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .resolveMode = pAttachment->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
-            .resolveImageView = pAttachment->pResolveAttachment ? pAttachment->pResolveAttachment->imageView : NULL,
-            .resolveImageLayout =
-                pAttachment->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED,
+            .resolveMode = pAttachmentSet->pResolveAttachment ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+            .resolveImageView =
+                pAttachmentSet->pResolveAttachment ? pAttachmentSet->pResolveAttachment->imageView : NULL,
+            .resolveImageLayout = pAttachmentSet->pResolveAttachment ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                                     : VK_IMAGE_LAYOUT_UNDEFINED,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
         };
-        pAttachment->pFormats[i] = pAttachment->pColorAttachments[i].format;
+        pAttachmentSet->pFormats[i] = pAttachmentSet->pColorAttachments[i].format;
     }
 
-    pAttachment->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
+    pAttachmentSet->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = colorAttachmentCount,
-        .pColorAttachmentFormats = pAttachment->pFormats,
+        .pColorAttachmentFormats = pAttachmentSet->pFormats,
         .depthAttachmentFormat = pDepthAttachment->format,
     };
 }
 
-void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachments, GfxImage* pDepthAttachment,
-                         GfxImage* pResolveAttachment, GfxAttachment* pAttachment)
+void ygCreateAttachment(uint32_t colorAttachmentCount, YgImage* pColorAttachments, YgImage* pDepthAttachment,
+                        YgImage* pResolveAttachment, YgAttachment* pAttachment)
 {
     GFX_RESET(pAttachment);
 
-    createAttachment(pAttachment, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
+    createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
 void gfxDestroyAttachment(GfxAttachment* pAttachment)
@@ -2230,16 +2237,16 @@ void gfxRecreateAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentC
 void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkClearValue clearValue,
                           VkAttachmentLoadOp loadOp)
 {
-    for (uint32_t i = 0; i < pAttachment->colorAttachmentCount; i++) {
-        pAttachment->pRenderingAttachmentInfos[i].clearValue = clearValue;
-        pAttachment->pRenderingAttachmentInfos[i].loadOp = loadOp;
+    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
+        pAttachmentSet->pRenderingAttachmentInfos[i].clearValue = clearValue;
+        pAttachmentSet->pRenderingAttachmentInfos[i].loadOp = loadOp;
     }
 
     VkRenderingAttachmentInfo depthAttachmentInfo;
-    if (pAttachment->pDepthAttachment) {
+    if (pAttachmentSet->pDepthAttachment) {
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachment->pDepthAttachment->imageView,
+            .imageView = pAttachmentSet->pDepthAttachment->imageView,
             .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -2248,17 +2255,17 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment,
     }
 
     VkExtent2D extent = {
-        .width = pAttachment->pColorAttachments[0].width,
-        .height = pAttachment->pColorAttachments[0].height,
+        .width = pAttachmentSet->pColorAttachments[0].width,
+        .height = pAttachmentSet->pColorAttachments[0].height,
     };
 
     VkRenderingInfo renderingInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = {.offset = {0, 0}, .extent = extent},
         .layerCount = 1,
-        .colorAttachmentCount = pAttachment->colorAttachmentCount,
-        .pColorAttachments = pAttachment->pRenderingAttachmentInfos,
-        .pDepthAttachment = pAttachment->pDepthAttachment ? &depthAttachmentInfo : NULL,
+        .colorAttachmentCount = pAttachmentSet->colorAttachmentCount,
+        .pColorAttachments = pAttachmentSet->pRenderingAttachmentInfos,
+        .pDepthAttachment = pAttachmentSet->pDepthAttachment ? &depthAttachmentInfo : NULL,
         .pStencilAttachment = NULL,
     };
 
