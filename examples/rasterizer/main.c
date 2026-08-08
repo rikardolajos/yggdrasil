@@ -115,8 +115,8 @@ static void createAttachments(GfxImage* pColorAttachment, GfxImage* pDepthAttach
     VkCommandBuffer cmd = gfxCmdBegin();
     gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
                     VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
-                    pDepthAttachment->image, &depthSubresourceRange);
+                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, pDepthAttachment->image,
+                    &depthSubresourceRange);
     gfxCmdEnd(cmd);
 }
 
@@ -268,8 +268,14 @@ int main()
             gfxRecreateAttachment(&attachment, 1, &colorAttachment, &depthAttachment, NULL);
         }
 
-        // Start new frame
+        // Start new frame. No command buffer means the swapchain was out of
+        // date and got recreated, so skip this frame.
         VkCommandBuffer cmd = gfxAcquireNextImage();
+        if (!cmd) {
+            glfwPollEvents();
+            continue;
+        }
+
         gfxTransitionForColorAttachment(cmd, &colorAttachment);
 
         VkClearValue clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};

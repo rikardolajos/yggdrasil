@@ -167,16 +167,25 @@ struct VulkanResult {
 #endif
 #endif
 
-// Check for Vulkan function call for errors
+// Get the string representation of a VkResult. Returns "VK_RESULT_UNKNOWN" for
+// codes that are not in the table.
+static inline const char* gfxResultString(VkResult result)
+{
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(gfxVulkanResults); i++) {
+        if (result == gfxVulkanResults[i].result) {
+            return gfxVulkanResults[i].string;
+        }
+    }
+    return "VK_RESULT_UNKNOWN";
+}
+
+// Check a Vulkan function call for errors. Only negative results are errors;
+// positive results (VK_INCOMPLETE, VK_SUBOPTIMAL_KHR, ...) are successes.
 #define VK_CHECK(x)                                                                                                    \
     do {                                                                                                               \
-        VkResult res = x;                                                                                              \
-        if (res) {                                                                                                     \
-            for (size_t i = 0; i < GFX_ARRAY_LEN(gfxVulkanResults); i++) {                                             \
-                if ((res) == gfxVulkanResults[i].result) {                                                             \
-                    GFX_ERROR("%s", gfxVulkanResults[i].string);                                                       \
-                }                                                                                                      \
-            }                                                                                                          \
+        VkResult gfxCheckedResult = (x);                                                                               \
+        if (gfxCheckedResult < 0) {                                                                                    \
+            GFX_ERROR("%s (%d)", gfxResultString(gfxCheckedResult), (int)gfxCheckedResult);                            \
         }                                                                                                              \
     } while (0)
 
@@ -215,7 +224,10 @@ typedef struct GfxDevice {
 // present images from the swapchain respectively. The swapchain can be
 // recreated with gfxRecreateSwapchain() if the framebuffer size changed. The
 // framebufferSizeCallback() function pointer will be used to retrieve the new
-// framebuffer size. Release resources with gfxDestroySwapchain().
+// framebuffer size. The recreated flag is set when the swapchain has been
+// recreated and stays set until the next gfxAcquireNextImage(), so that
+// attachments can be resized at the top of the frame loop. Release resources
+// with gfxDestroySwapchain().
 typedef struct GfxSwapchain {
     VkSwapchainKHR swapchain;
     VkFormat format;
@@ -308,7 +320,7 @@ typedef struct GfxTexture {
 // Attachment sets keeps track of color and depth attachments and prepares for
 // dynamic rendering. Create a new pass attachment description with
 // gfxCreateAttachment(). Before rendering with the attachment call
-// gfxBeginRendering() and call gfxEndRendering() when done. If the attachment
+// gfxCmdBeginRendering() and call gfxCmdEndRendering() when done. If the attachment
 // changes (resolution change for instance), it should be recreated.
 // gfxRecreateAttachment() can be used, or alternatively gfxDestroyAttachment()
 // and gfxCreateAttachment(). Release resources with gfxDestroyAttachment().
@@ -420,9 +432,11 @@ void ygWaitForFence();
 
 /// <summary>
 /// Acquire a new image from the swapchain. This call will block until an image
-/// is available.
+/// is available. If the swapchain was out of date it is recreated and
+/// VK_NULL_HANDLE is returned; the caller must then skip the frame and check
+/// gfxSwapchain.recreated before acquiring again.
 /// </summary>
-/// <returns>Command buffer to use to render to the new image</returns>
+/// <returns>Command buffer to use to render to the new image, or VK_NULL_HANDLE if no image was acquired</returns>
 VkCommandBuffer gfxAcquireNextImage();
 
 /// <summary>
@@ -606,15 +620,15 @@ void gfxRecreateAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentC
 /// <param name="pAttachment">Pass to use</param>
 /// <param name="clearValue">Clear value for attachments</param>
 /// <param name="loadOp">Load operation for attachments</param>
-void gfxCmdBeginPass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkClearValue clearValue,
-                     VkAttachmentLoadOp loadOp);
+void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkClearValue clearValue,
+                          VkAttachmentLoadOp loadOp);
 
 /// <summary>
 /// End dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachment">Pass to use</param>
-void gfxCmdEndPass(VkCommandBuffer cmd, const GfxAttachment* pAttachment);
+void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment);
 
 /// <summary>
 /// Create a new layout.
@@ -859,8 +873,8 @@ inline VkFormat gfxFindDepthFormat()
 /// <param name="oldLayout">Previous image layout</param>
 /// <param name="newLayout">New image layout</param>
 /// <param name="image">Image to use</param>
-/// <param name="pSubresourceRange">Subresource range to use, can be NULL in which case a default subrange is
-/// used.</param>
+/// <param name="pSubresourceRange">Subresource range to use, can be NULL in which case all mip levels and array
+/// layers of the color aspect are used.</param>
 inline void gfxImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
                             VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout oldLayout,
                             VkImageLayout newLayout, VkImage image, VkImageSubresourceRange* pSubresourceRange)
@@ -868,9 +882,9 @@ inline void gfxImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
     VkImageSubresourceRange defaultSubresourceRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .baseMipLevel = 0,
-        .levelCount = 1,
+        .levelCount = VK_REMAINING_MIP_LEVELS,
         .baseArrayLayer = 0,
-        .layerCount = 1,
+        .layerCount = VK_REMAINING_ARRAY_LAYERS,
     };
 
     VkImageMemoryBarrier2 barrier = {
@@ -1065,16 +1079,23 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
     createDebugMessenger();
     GFX_FREE(ppExpandedExtensions);
 #endif
+
+    // Required before any use of the glslang C interface
+    glslang_initialize_process();
 }
 
 void gfxDestroyInstance()
 {
     if (gfxDevice.instance) {
-#if defined(_DEBUG)
+#ifndef NDEBUG
         destroyDebugUtilsMessengerEXT(gfxDevice.instance, gfxDevice.debugMessenger, NULL);
 #endif
         vkDestroyInstance(gfxDevice.instance, NULL);
     }
+
+    glslang_finalize_process();
+
+    GFX_RESET(&gfxDevice);
 }
 
 static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount, const char** ppDeviceExtensions)
@@ -1151,14 +1172,14 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamil
     }
 
     uint32_t index = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        if (pProps[i].queueFlags & requiredFamilyFlags) {
+    for (; index < n; index++) {
+        if ((pProps[index].queueFlags & requiredFamilyFlags) == requiredFamilyFlags) {
             break;
         }
-        index++;
     }
 
     if (index == n) {
+        GFX_FREE(pProps);
         GFX_ERROR("No Vulkan queue found for requested families");
     }
 
@@ -1229,7 +1250,7 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     checkDeviceExtensionSupport(deviceExtensionCount, ppDeviceExtensions);
 
     uint32_t queueFamilyIndex =
-        getQueueFamilyIndex(surface, VK_QUEUE_GRAPHICS_BIT && VK_QUEUE_COMPUTE_BIT && VK_QUEUE_TRANSFER_BIT);
+        getQueueFamilyIndex(surface, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT);
 
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCreateInfo = {
@@ -1278,7 +1299,21 @@ void gfxDestroyDevice()
         vkDestroySurfaceKHR(gfxDevice.instance, gfxDevice.surface, NULL);
     }
 
+    // Only reset the device owned state. The instance is still alive and is
+    // released by gfxDestroyInstance().
+    VkInstance instance = gfxDevice.instance;
+    uint32_t apiVersion = gfxDevice.apiVersion;
+#ifndef NDEBUG
+    VkDebugUtilsMessengerEXT debugMessenger = gfxDevice.debugMessenger;
+#endif
+
     GFX_RESET(&gfxDevice);
+
+    gfxDevice.instance = instance;
+    gfxDevice.apiVersion = apiVersion;
+#ifndef NDEBUG
+    gfxDevice.debugMessenger = debugMessenger;
+#endif
 }
 
 VkSampleCountFlagBits gfxGetDeviceSampleCount()
@@ -1324,7 +1359,7 @@ static void querySupport()
     VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(gfxDevice.physicalDevice, gfxDevice.surface,
                                                        &gfxSwapchain.supportDetails.presentCount, NULL));
     gfxSwapchain.supportDetails.presentModes =
-        GFX_MALLOC(gfxSwapchain.supportDetails.presentCount * sizeof *&gfxSwapchain.supportDetails.presentModes);
+        GFX_MALLOC(gfxSwapchain.supportDetails.presentCount * sizeof *gfxSwapchain.supportDetails.presentModes);
     VK_CHECK(vkGetPhysicalDeviceSurfacePresentModesKHR(gfxDevice.physicalDevice, gfxDevice.surface,
                                                        &gfxSwapchain.supportDetails.presentCount,
                                                        gfxSwapchain.supportDetails.presentModes));
@@ -1588,6 +1623,9 @@ void gfxRecreateSwapchain()
 
 VkCommandBuffer gfxAcquireNextImage()
 {
+    // The caller has had a full iteration to react to a recreated swapchain
+    gfxSwapchain.recreated = false;
+
     // Wait for the current frame to not be in flight
     VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex], VK_TRUE,
                              UINT64_MAX));
@@ -1598,9 +1636,11 @@ VkCommandBuffer gfxAcquireNextImage()
                                             gfxSwapchain.inFlightSemaphores[gfxSwapchain.inFlightIndex], NULL,
                                             &gfxSwapchain.imageIndex);
 
-    // Check if swapchain needs to be reconstructed
+    // Check if swapchain needs to be reconstructed. No image was acquired and
+    // no semaphore was signaled, so this frame cannot be rendered.
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         gfxRecreateSwapchain();
+        return VK_NULL_HANDLE;
     } else if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
         GFX_ERROR("Failed to acquire next swapchain image");
     }
@@ -1617,14 +1657,12 @@ VkCommandBuffer gfxAcquireNextImage()
 
 void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
 {
-    if (gfxSwapchain.recreated) {
-        gfxSwapchain.recreated = false;
-    }
-
-    // Transition swapchain image for blitting
-    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
-                    VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, gfxSwapchain.images[gfxSwapchain.imageIndex], NULL);
+    // Transition swapchain image for blitting. The image comes from the
+    // presentation engine, so the acquire semaphore provides the source
+    // dependency.
+    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    gfxSwapchain.images[gfxSwapchain.imageIndex], NULL);
 
     // Blit image to current swapchain image
     VkImageSubresourceLayers subresourceLayers = {
@@ -1665,7 +1703,9 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
-    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    // The first use of the acquired image is the blit above, so the acquire
+    // semaphore has to be waited on before the transfer stage
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -2175,8 +2215,8 @@ void gfxSetTextureAddressMode(GfxTexture* pTexture, VkSamplerAddressMode modeU, 
     createSampler(pTexture);
 }
 
-static createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
-                        GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
+static void createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
+                             GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
 {
     *pAttachment = (GfxAttachment){
         .pRenderingAttachmentInfos = GFX_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
@@ -2205,8 +2245,8 @@ static createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCoun
     pAttachmentSet->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = colorAttachmentCount,
-        .pColorAttachmentFormats = pAttachmentSet->pFormats,
-        .depthAttachmentFormat = pDepthAttachment->format,
+        .pColorAttachmentFormats = pAttachment->pFormats,
+        .depthAttachmentFormat = pDepthAttachment ? pDepthAttachment->format : VK_FORMAT_UNDEFINED,
     };
 }
 
@@ -2246,8 +2286,8 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment,
     if (pAttachmentSet->pDepthAttachment) {
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachmentSet->pDepthAttachment->imageView,
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL,
+            .imageView = pAttachment->pDepthAttachment->imageView,
+            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue.depthStencil = {.depth = 0.0f, .stencil = 0},
@@ -2550,9 +2590,12 @@ void gfxDestroyShader(GfxShader* pShader)
     GFX_RESET(pShader);
 }
 
+// Shaders created from SPIR-V byte code have no source path
+#define GFX_SHADER_NAME(pShader) ((pShader)->pPath ? (pShader)->pPath : "(SPIR-V)")
+
 void gfxBuildShader(GfxShader* pShader)
 {
-    GFX_INFO("Building shader: %s", pShader->pPath);
+    GFX_INFO("Building shader: %s", GFX_SHADER_NAME(pShader));
     VK_LOAD(vkCreateShadersEXT);
     VK_CHECK(XvkCreateShadersEXT(gfxDevice.device, 1, &pShader->createInfo, NULL, &pShader->shader));
 }
@@ -2563,8 +2606,8 @@ void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
         GFX_ERROR("Both pVertexShader and pFragmentShader need to be specified");
     }
 
-    GFX_INFO("Building shaders: %s", pVertexShader->pPath);
-    GFX_INFO("                  %s", pFragmentShader->pPath);
+    GFX_INFO("Building shaders: %s", GFX_SHADER_NAME(pVertexShader));
+    GFX_INFO("                  %s", GFX_SHADER_NAME(pFragmentShader));
 
     VkShaderCreateInfoEXT createInfos[] = {
         pVertexShader->createInfo,
