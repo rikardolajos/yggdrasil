@@ -206,6 +206,25 @@ typedef struct GfxDeviceProperties {
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingPipeline;
 } GfxDeviceProperties;
 
+// Device level function pointers for extensions that the Vulkan loader does not
+// export directly. Resolved once by gfxCreateDevice() instead of on every call.
+// Call them through gfxDevice.fn, for instance:
+//     gfxDevice.fn.vkCmdPushDescriptorSetKHR(cmd, ...);
+typedef struct GfxDeviceFunctions {
+    PFN_vkCreateShadersEXT vkCreateShadersEXT;
+    PFN_vkDestroyShaderEXT vkDestroyShaderEXT;
+    PFN_vkCmdBindShadersEXT vkCmdBindShadersEXT;
+    PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
+    PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT;
+    PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT;
+    PFN_vkCmdSetAlphaToCoverageEnableEXT vkCmdSetAlphaToCoverageEnableEXT;
+    PFN_vkCmdSetPolygonModeEXT vkCmdSetPolygonModeEXT;
+    PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;
+    PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;
+    PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;
+    PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
+} GfxDeviceFunctions;
+
 // Device contains a Vulkan context for rendering. The GFX device is
 // monolithic and is setup through gfxCreateInstance() and gfxCreateDevice().
 // Release resources with gfxDestroyDevice() and gfxDestroyInstance().
@@ -215,6 +234,7 @@ typedef struct GfxDevice {
     VkDevice device;
     VkSurfaceKHR surface;
     GfxDeviceProperties properties;
+    GfxDeviceFunctions fn;
     VkCommandPool commandPool;
     VkQueue queue;
 #ifndef NDEBUG
@@ -223,11 +243,12 @@ typedef struct GfxDevice {
     uint32_t queueFamilyIndex;
     uint32_t apiVersion;
     bool vsync;
+    bool samplerAnisotropy;
 } GfxDevice;
 
 // Swapchain abstracts the handling of swapchain images and frames in flight.
 // The GFX swapchain is monolithic and is setup through
-// gfxCreateSwapchain(). Use gfxAcquiteNextImage() and gfxPresent() to acquire and
+// gfxCreateSwapchain(). Use gfxAcquireNextImage() and gfxPresent() to acquire and
 // present images from the swapchain respectively. The swapchain can be
 // recreated with gfxRecreateSwapchain() if the framebuffer size changed. The
 // framebufferSizeCallback() function pointer will be used to retrieve the new
@@ -270,7 +291,7 @@ typedef struct GfxSwapchain {
 // to the device allocated buffer with gfxCopyBufferFromHost(). A buffer with
 // host coherent memory will always be mapped on pHostMap. When copying buffers
 // from host to device with a non-host coherent memory, a staging buffer will be
-// used. Realse resources with gfxDestroyDevice().
+// used. Release resources with gfxDestroyBuffer().
 typedef struct GfxBuffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -278,7 +299,6 @@ typedef struct GfxBuffer {
     VkMemoryPropertyFlags properties;
     VkDeviceSize size;
     void* pHostMap;
-    VkDescriptorBufferInfo bufferInfo;
 } GfxBuffer;
 
 // Image abstracts a Vulkan image, image view and memory allocation. Use
@@ -290,9 +310,14 @@ typedef struct GfxImage {
     VkDeviceMemory memory;
     uint32_t width;
     uint32_t height;
+    uint32_t depth;
+    uint32_t arrayLayers;
     uint32_t mipLevels;
     VkFormat format;
     VkImageTiling tiling;
+    VkImageType imageType;
+    VkImageViewType viewType;
+    VkSampleCountFlagBits samples;
 } GfxImage;
 
 // Different textures types for creating textures.
@@ -308,8 +333,9 @@ enum GfxTextureType {
 // texture with gfxCreateTexture() and passing it a pointer to the texture data.
 // If stb_image.h is available and GFX_USE_STB_IMAGE has been defined,
 // textures can be created from files using gfxCreateTextureFromFile(). Mipmaps
-// are automatically generated if specified. Use gfxSetTextureSampler() to assign
-// a sampler for the texture. The write descriptor for the texture can be
+// are automatically generated if specified. A sampler is created with the
+// texture; use the gfxSetTexture*() functions to reconfigure it. The write
+// descriptor for the texture can be
 // retrieved with gfxGetTextureDescriptor(). Release resources with
 // gfxDestroyTexture().
 typedef struct GfxTexture {
@@ -358,10 +384,15 @@ typedef struct GfxLayout {
 // using the shader, the shader has to be build. Either use gfxBuildShader(), or
 // use gfxBuildLinkedShaders() to build an optimized vertex-fragment shader pair.
 // For rendering, the active shader has to be bound: use gfxCmdBindShader().
+// The shader takes its own copy of the layout's descriptor set layout handle
+// and push constant ranges, but the underlying VkDescriptorSetLayout is still
+// owned by the GfxLayout and must not be destroyed before the shader is built.
 // Release resources with gfxDestroyShader().
 typedef struct GfxShader {
     VkShaderEXT shader;
     VkShaderCreateInfoEXT createInfo;
+    VkDescriptorSetLayout setLayout;
+    VkPushConstantRange* pPushConstantRanges;
     char* pPath;
     void* pCode;
 } GfxShader;
@@ -371,6 +402,15 @@ typedef struct GfxShader {
 
 extern GfxDevice gfxDevice;
 extern GfxSwapchain gfxSwapchain;
+
+// Load a device level function pointer as Xvk...(). The entry points used by
+// GFX itself are already cached in gfxDevice.fn; use this for any others, for
+// instance the ray tracing entry points:
+//     VK_LOAD(vkCmdTraceRaysKHR);
+//     XvkCmdTraceRaysKHR(cmd, ...);
+// Prefer hoisting the load out of hot loops, since it is a loader lookup.
+#define VK_LOAD(func_name)                                                                                             \
+    PFN_##func_name X##func_name = (PFN_##func_name)vkGetDeviceProcAddr(gfxDevice.device, #func_name)
 
 
 // Function declarations //
@@ -479,31 +519,37 @@ void gfxDestroyBuffer(GfxBuffer* pBuffer);
 void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset);
 
 /// <summary>
-/// Get the write descriptor of a buffer.
+/// Get the write descriptor of a buffer. The returned write points at
+/// pBufferInfo, which must stay alive until the write has been consumed.
 /// </summary>
 /// <param name="pBuffer">Buffer to use</param>
 /// <param name="binding">In which binding the buffer descriptor should be placed</param>
 /// <param name="type">Type of descriptor</param>
 /// <param name="offset">Offset into buffer to bind</param>
 /// <param name="range">Range in bytes to bind, can be VK_WHOLE_SIZE</param>
+/// <param name="pBufferInfo">Storage for the buffer info that the write refers to</param>
 /// <returns>A write descriptor set</returns>
-VkWriteDescriptorSet gfxGetBufferDescriptor(GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
-                                            VkDeviceSize offset, VkDeviceSize range);
+VkWriteDescriptorSet gfxGetBufferDescriptor(const GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
+                                            VkDeviceSize offset, VkDeviceSize range,
+                                            VkDescriptorBufferInfo* pBufferInfo);
 
 /// <summary>
 /// Create a new image.
 /// </summary>
-/// <param name="width">Width of image</param>
-/// <param name="height">Height of image</param>
+/// <param name="extent">Size of the image. Height and depth must be 1 for 1D, depth must be 1 for 1D and 2D</param>
+/// <param name="arrayLayers">Number of array layers, 6 for a cube compatible image</param>
 /// <param name="mipLevels">Mipmap levels to use</param>
 /// <param name="samples">Sample count</param>
 /// <param name="format">Format to use</param>
 /// <param name="tiling">Tiling to use</param>
 /// <param name="usage">How the image will be used</param>
+/// <param name="flags">Image create flags, for instance VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT</param>
+/// <param name="imageType">Whether the image is 1D, 2D or 3D</param>
 /// <param name="properties">Properties of the memory to allocate</param>
 /// <param name="pImage">Where the created image will be stored</param>
-void gfxCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkSampleCountFlagBits samples, VkFormat format,
-                    VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, GfxImage* pImage);
+void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels, VkSampleCountFlagBits samples,
+                    VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
+                    VkImageType imageType, VkMemoryPropertyFlags properties, GfxImage* pImage);
 
 /// <summary>
 /// Release resources for an image.
@@ -516,27 +562,28 @@ void gfxDestroyImage(GfxImage* pImage);
 /// </summary>
 /// <param name="pImage">Image to use</param>
 /// <param name="aspectFlags">Aspect flags to use for image view</param>
-void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags);
+/// <param name="viewType">Type of view to create, must be compatible with how the image was created</param>
+void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImageViewType viewType);
 
 /// <summary>
-/// Create a new texture.
+/// Create a new texture. For a cube map, pData holds the six faces in the order
+/// +X, -X, +Y, -Y, +Z, -Z.
 /// </summary>
 /// <param name="type">Type of texture to create</param>
 /// <param name="format">Format to use</param>
-/// <param name="pData">Pointer to data with texture pixel values</param>
-/// <param name="width">Width of texture</param>
-/// <param name="height">Height of texture</param>
+/// <param name="pData">Pointer to data with texture pixel values, can be NULL</param>
+/// <param name="extent">Size of the texture. Height must be 1 for 1D, depth must be 1 for anything but 3D</param>
 /// <param name="channels">Number of channels in texture</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
 /// <param name="pTexture">Where the created texture will be stored</param>
-void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, uint32_t width, uint32_t height,
+void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, VkExtent3D extent,
                       uint32_t channels, bool generateMipmaps, GfxTexture* pTexture);
 
 #ifdef GFX_USE_STB_IMAGE
 /// <summary>
-/// Create a new texture from file.
+/// Create a new texture from file. Only GFX_TEXTURE_2D is supported.
 /// </summary>
-/// <param name="type">Type of texture to create</param>
+/// <param name="type">Type of texture to create, must be GFX_TEXTURE_2D</param>
 /// <param name="format">Format to use</param>
 /// <param name="pPath">Path to texture file</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
@@ -706,17 +753,30 @@ void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
 void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader);
 
 /// <summary>
-/// Set default states for rendering using shader objects.
+/// Set default states for rendering using shader objects. Viewport, scissor and
+/// sample count are taken from the attachment set's first color attachment.
+/// Depth testing is enabled with a reverse Z convention: the depth attachment is
+/// cleared to 0.0 and VK_COMPARE_OP_GREATER wins.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
+/// <param name="pAttachmentSet">Attachment set being rendered to</param>
 /// <param name="vertexBindingDescriptionCount">Number of vertex binding descriptions</param>
 /// <param name="vertexBindingDescriptions">List of vertex binding descriptions</param>
 /// <param name="vertexAttributeDescriptionCount">Number of vertex attribute descriptions</param>
-/// <param name="vertexAttributeDescriptions">List of vertex attrubyte descriptions</param>
-void gfxCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+/// <param name="vertexAttributeDescriptions">List of vertex attribute descriptions</param>
+void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet,
+                            uint32_t vertexBindingDescriptionCount,
                             const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
                             uint32_t vertexAttributeDescriptionCount,
                             const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
+
+/// <summary>
+/// Set whether the swapchain should present with vertical synchronization. If a
+/// swapchain already exists it is recreated to pick up the new present mode.
+/// Off by default.
+/// </summary>
+/// <param name="vsync">Whether to wait for vertical blank when presenting</param>
+void gfxSetVsync(bool vsync);
 
 // Inlined helper functions //
 
@@ -829,7 +889,7 @@ static inline uint32_t gfxFindMemoryType(uint32_t typeFilter, VkMemoryPropertyFl
 /// <param name="pCandidates">List of candidate formats</param>
 /// <param name="candidateCount">Number of candidates</param>
 /// <param name="tiling">Required image tiling</param>
-/// <param name="features"Format feature flags></param>
+/// <param name="features">Format feature flags</param>
 /// <returns>A supported format</returns>
 static inline VkFormat gfxFindSupportedFormat(VkFormat* pCandidates, uint32_t candidateCount, VkImageTiling tiling,
                                               VkFormatFeatureFlags features)
@@ -946,7 +1006,7 @@ static inline void gfxTransitionForBlitting(VkCommandBuffer cmd, GfxImage* pImag
 }
 
 // Define GFX_IMPLEMENTATION in exactly one compilation unit before
-// including gfxgdrasil.h
+// including gfx.h
 #ifdef GFX_IMPLEMENTATION
 
 
@@ -972,17 +1032,6 @@ GfxSwapchain gfxSwapchain;
 
 // Explicitly mark a variable as unused
 #define GFX_UNUSED(x) (void)(x)
-
-// Macro for loading a device function pointers as Xvk...()
-#define VK_LOAD(func_name)                                                                                             \
-    PFN_##func_name X##func_name = (PFN_##func_name)vkGetDeviceProcAddr(gfxDevice.device, #func_name)
-
-// Macro for calling a function via its vkGetDeviceProcAddr name
-#define VK_CALL(func_name, ...)                                                                                        \
-    do {                                                                                                               \
-        PFN_##func_name pfn_##func_name = (PFN_##func_name)vkGetDeviceProcAddr(gfxDevice.device, #func_name);          \
-        pfn_##func_name(__VA_ARGS__);                                                                                  \
-    } while (0);
 
 #ifndef NDEBUG
 static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -1279,6 +1328,26 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     };
 
     VK_CHECK(vkCreateDevice(gfxDevice.physicalDevice, &ci, NULL, &gfxDevice.device));
+
+    // Remember whether anisotropic filtering was requested, so that samplers
+    // are not created with a feature that the device was not created with
+    gfxDevice.samplerAnisotropy = features && features->features.samplerAnisotropy;
+
+    // Resolve extension entry points once, rather than on every call
+#define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetDeviceProcAddr(gfxDevice.device, #name)
+    GFX_LOAD_FN(vkCreateShadersEXT);
+    GFX_LOAD_FN(vkDestroyShaderEXT);
+    GFX_LOAD_FN(vkCmdBindShadersEXT);
+    GFX_LOAD_FN(vkCmdSetVertexInputEXT);
+    GFX_LOAD_FN(vkCmdSetRasterizationSamplesEXT);
+    GFX_LOAD_FN(vkCmdSetSampleMaskEXT);
+    GFX_LOAD_FN(vkCmdSetAlphaToCoverageEnableEXT);
+    GFX_LOAD_FN(vkCmdSetPolygonModeEXT);
+    GFX_LOAD_FN(vkCmdSetLogicOpEnableEXT);
+    GFX_LOAD_FN(vkCmdSetColorBlendEnableEXT);
+    GFX_LOAD_FN(vkCmdSetColorWriteMaskEXT);
+    GFX_LOAD_FN(vkCmdPushDescriptorSetKHR);
+#undef GFX_LOAD_FN
 
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -1610,6 +1679,20 @@ void gfxDestroySwapchain()
     GFX_RESET(&gfxSwapchain);
 }
 
+void gfxSetVsync(bool vsync)
+{
+    if (gfxDevice.vsync == vsync) {
+        return;
+    }
+
+    gfxDevice.vsync = vsync;
+
+    // Present mode is baked into the swapchain, so it has to be rebuilt
+    if (gfxSwapchain.swapchain) {
+        gfxRecreateSwapchain();
+    }
+}
+
 void gfxRecreateSwapchain()
 {
     uint32_t width, height;
@@ -1756,8 +1839,6 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
 
 void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, GfxBuffer* pBuffer)
 {
-    GFX_RESET(pBuffer);
-
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
     }
@@ -1776,8 +1857,6 @@ void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryProper
     };
 
     VK_CHECK(vkCreateBuffer(gfxDevice.device, &ci, NULL, &pBuffer->buffer));
-
-    pBuffer->bufferInfo.buffer = pBuffer->buffer;
 
     VkMemoryRequirements memReqs;
     vkGetBufferMemoryRequirements(gfxDevice.device, pBuffer->buffer, &memReqs);
@@ -1854,10 +1933,11 @@ void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDevice
     }
 }
 
-VkWriteDescriptorSet gfxGetBufferDescriptor(GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
-                                            VkDeviceSize offset, VkDeviceSize range)
+VkWriteDescriptorSet gfxGetBufferDescriptor(const GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
+                                            VkDeviceSize offset, VkDeviceSize range,
+                                            VkDescriptorBufferInfo* pBufferInfo)
 {
-    pBuffer->bufferInfo = (VkDescriptorBufferInfo){
+    *pBufferInfo = (VkDescriptorBufferInfo){
         .buffer = pBuffer->buffer,
         .offset = offset,
         .range = range,
@@ -1869,34 +1949,38 @@ VkWriteDescriptorSet gfxGetBufferDescriptor(GfxBuffer* pBuffer, uint32_t binding
         .dstArrayElement = 0,
         .descriptorCount = 1,
         .descriptorType = type,
-        .pBufferInfo = &pBuffer->bufferInfo,
+        .pBufferInfo = pBufferInfo,
     };
 }
 
-void gfxCreateImage(uint32_t width, uint32_t height, uint32_t mipLevels, VkSampleCountFlagBits samples, VkFormat format,
-                    VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, GfxImage* pImage)
+void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels, VkSampleCountFlagBits samples,
+                    VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
+                    VkImageType imageType, VkMemoryPropertyFlags properties, GfxImage* pImage)
 {
-    GFX_RESET(pImage);
-
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
     }
 
     *pImage = (GfxImage){
-        .width = width,
-        .height = height,
+        .width = extent.width,
+        .height = extent.height,
+        .depth = extent.depth,
+        .arrayLayers = arrayLayers,
         .mipLevels = mipLevels,
         .format = format,
         .tiling = tiling,
+        .imageType = imageType,
+        .samples = samples,
     };
 
     VkImageCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = VK_IMAGE_TYPE_2D,
+        .flags = flags,
+        .imageType = imageType,
         .format = format,
-        .extent = {.width = width, .height = height, .depth = 1},
+        .extent = extent,
         .mipLevels = mipLevels,
-        .arrayLayers = 1,
+        .arrayLayers = arrayLayers,
         .samples = samples,
         .tiling = tiling,
         .usage = usage,
@@ -1931,16 +2015,18 @@ void gfxDestroyImage(GfxImage* pImage)
     GFX_RESET(pImage);
 }
 
-void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags)
+void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImageViewType viewType)
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
     }
 
+    pImage->viewType = viewType;
+
     VkImageViewCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .image = pImage->image,
-        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .viewType = viewType,
         .format = pImage->format,
         .components = {.r = VK_COMPONENT_SWIZZLE_IDENTITY,
                        .g = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -1950,7 +2036,7 @@ void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags)
                              .baseMipLevel = 0,
                              .levelCount = pImage->mipLevels,
                              .baseArrayLayer = 0,
-                             .layerCount = 1},
+                             .layerCount = pImage->arrayLayers},
     };
 
     VK_CHECK(vkCreateImageView(gfxDevice.device, &ci, NULL, &pImage->imageView));
@@ -1971,11 +2057,12 @@ static void generateMipmaps(GfxTexture* pTexture)
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .levelCount = 1,
         .baseArrayLayer = 0,
-        .layerCount = 1,
+        .layerCount = pTexture->image.arrayLayers,
     };
 
     int32_t mipWidth = pTexture->image.width;
     int32_t mipHeight = pTexture->image.height;
+    int32_t mipDepth = pTexture->image.depth;
 
     for (uint32_t i = 1; i < pTexture->image.mipLevels; i++) {
         subresourceRange.baseMipLevel = i - 1;
@@ -1990,13 +2077,15 @@ static void generateMipmaps(GfxTexture* pTexture)
             .srcSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                                .mipLevel = i - 1,
                                .baseArrayLayer = 0,
-                               .layerCount = 1},
-            .srcOffsets = {{0, 0, 0}, {mipWidth, mipHeight, 1}},
+                               .layerCount = pTexture->image.arrayLayers},
+            .srcOffsets = {{0, 0, 0}, {mipWidth, mipHeight, mipDepth}},
             .dstSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                                .mipLevel = i,
                                .baseArrayLayer = 0,
-                               .layerCount = 1},
-            .dstOffsets = {{0, 0, 0}, {mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1, 1}},
+                               .layerCount = pTexture->image.arrayLayers},
+            .dstOffsets = {{0, 0, 0},
+                           {mipWidth > 1 ? mipWidth / 2 : 1, mipHeight > 1 ? mipHeight / 2 : 1,
+                            mipDepth > 1 ? mipDepth / 2 : 1}},
         };
 
         VkBlitImageInfo2 blitImageInfo = {
@@ -2023,6 +2112,9 @@ static void generateMipmaps(GfxTexture* pTexture)
         if (mipHeight > 1) {
             mipHeight /= 2;
         }
+        if (mipDepth > 1) {
+            mipDepth /= 2;
+        }
     }
 
     subresourceRange.baseMipLevel = pTexture->image.mipLevels - 1;
@@ -2036,19 +2128,63 @@ static void generateMipmaps(GfxTexture* pTexture)
 }
 
 static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkFormat format, const void* pData,
-                          uint32_t width, uint32_t height, uint32_t channels, bool mipmaps)
+                          VkExtent3D extent, uint32_t channels, bool mipmaps)
 {
-    uint32_t mipLevels = 1;
-    if (mipmaps) {
-        mipLevels = (uint32_t)floor(log2(GFX_MAX(width, height))) + 1;
+    VkImageType imageType;
+    VkImageViewType viewType;
+    VkImageCreateFlags flags = 0;
+    uint32_t arrayLayers = 1;
+
+    switch (type) {
+    case GFX_TEXTURE_1D:
+        imageType = VK_IMAGE_TYPE_1D;
+        viewType = VK_IMAGE_VIEW_TYPE_1D;
+        break;
+    case GFX_TEXTURE_2D:
+        imageType = VK_IMAGE_TYPE_2D;
+        viewType = VK_IMAGE_VIEW_TYPE_2D;
+        break;
+    case GFX_TEXTURE_3D:
+        imageType = VK_IMAGE_TYPE_3D;
+        viewType = VK_IMAGE_VIEW_TYPE_3D;
+        break;
+    case GFX_TEXTURE_CUBE_MAP:
+        // A cube map is six 2D layers, with pData holding the faces in the
+        // order +X, -X, +Y, -Y, +Z, -Z
+        imageType = VK_IMAGE_TYPE_2D;
+        viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+        flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+        arrayLayers = 6;
+        break;
+    default:
+        GFX_ERROR("Unknown texture type");
+        return;
     }
 
-    gfxCreateImage(width, height, mipLevels, VK_SAMPLE_COUNT_1_BIT, format, VK_IMAGE_TILING_OPTIMAL,
+    if (imageType != VK_IMAGE_TYPE_3D && extent.depth != 1) {
+        GFX_ERROR("Only 3D textures can have a depth other than 1");
+    }
+    if (imageType == VK_IMAGE_TYPE_1D && extent.height != 1) {
+        GFX_ERROR("1D textures must have a height of 1");
+    }
+
+    uint32_t mipLevels = 1;
+    if (mipmaps) {
+        uint32_t largest = GFX_MAX(extent.width, extent.height);
+        if (imageType == VK_IMAGE_TYPE_3D) {
+            largest = GFX_MAX(largest, extent.depth);
+        }
+        mipLevels = (uint32_t)floor(log2(largest)) + 1;
+    }
+
+    gfxCreateImage(extent, arrayLayers, mipLevels, VK_SAMPLE_COUNT_1_BIT, format, VK_IMAGE_TILING_OPTIMAL,
                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTexture->image);
+                   flags, imageType, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTexture->image);
 
     if (pData) {
-        VkDeviceSize size = width * height * channels;
+        // Widen before multiplying, so large textures do not overflow. Note
+        // that this assumes one byte per channel.
+        VkDeviceSize size = (VkDeviceSize)extent.width * extent.height * extent.depth * arrayLayers * channels;
 
         GfxBuffer staging;
         gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -2069,9 +2205,9 @@ static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkForm
             .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
                                  .mipLevel = 0,
                                  .baseArrayLayer = 0,
-                                 .layerCount = 1},
-            .imageOffset = {0, 0},
-            .imageExtent = {width, height, 1},
+                                 .layerCount = arrayLayers},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = extent,
         };
 
         vkCmdCopyBufferToImage(cmd, staging.buffer, pTexture->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
@@ -2093,18 +2229,13 @@ static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkForm
         gfxDestroyBuffer(&staging);
     }
 
-    gfxCreateImageView(&pTexture->image, VK_IMAGE_ASPECT_COLOR_BIT);
+    gfxCreateImageView(&pTexture->image, VK_IMAGE_ASPECT_COLOR_BIT, viewType);
 
     pTexture->imageInfo = (VkDescriptorImageInfo){
         .sampler = NULL,
         .imageView = pTexture->image.imageView,
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
     };
-}
-
-static void setDefaultSampler(GfxTexture* pTexture)
-{
-    pTexture->sampler = VK_NULL_HANDLE;
 }
 
 static void createSampler(GfxTexture* pTexture)
@@ -2129,8 +2260,9 @@ static void createSampler(GfxTexture* pTexture)
         .addressModeU = pTexture->addressModeU,
         .addressModeV = pTexture->addressModeV,
         .addressModeW = pTexture->addressModeW,
-        .anisotropyEnable = VK_TRUE,
-        .maxAnisotropy = gfxDevice.properties.physicalDevice.limits.maxSamplerAnisotropy,
+        .anisotropyEnable = gfxDevice.samplerAnisotropy,
+        .maxAnisotropy =
+            gfxDevice.samplerAnisotropy ? gfxDevice.properties.physicalDevice.limits.maxSamplerAnisotropy : 1.0f,
         .borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK,
         .unnormalizedCoordinates = VK_FALSE,
         .compareEnable = VK_FALSE,
@@ -2144,12 +2276,12 @@ static void createSampler(GfxTexture* pTexture)
     pTexture->imageInfo.sampler = pTexture->sampler;
 }
 
-void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, uint32_t width, uint32_t height,
+void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, VkExtent3D extent,
                       uint32_t channels, bool generateMipmaps, GfxTexture* pTexture)
 {
     GFX_RESET(pTexture);
 
-    createTexture(pTexture, type, format, pData, width, height, channels, generateMipmaps);
+    createTexture(pTexture, type, format, pData, extent, channels, generateMipmaps);
     createSampler(pTexture);
 }
 
@@ -2158,6 +2290,11 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
                               GfxTexture* pTexture)
 {
     GFX_RESET(pTexture);
+
+    if (type != GFX_TEXTURE_2D) {
+        GFX_ERROR("Only GFX_TEXTURE_2D can be loaded from a single image file");
+        return;
+    }
 
     GFX_INFO("Loading texture from %s", pPath);
 
@@ -2173,7 +2310,8 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
         return;
     }
 
-    createTexture(pTexture, type, format, pData, width, height, channels, generateMipmaps);
+    VkExtent3D extent = {.width = (uint32_t)width, .height = (uint32_t)height, .depth = 1};
+    createTexture(pTexture, type, format, pData, extent, channels, generateMipmaps);
 
     stbi_image_free(pData);
 
@@ -2267,8 +2405,6 @@ static void createAttachmentSet(GfxAttachment* pAttachmentSet, uint32_t colorAtt
 void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachments, GfxImage* pDepthAttachment,
                          GfxImage* pResolveAttachment, GfxAttachment* pAttachmentSet)
 {
-    GFX_RESET(pAttachmentSet);
-
     createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
@@ -2335,8 +2471,6 @@ void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet
 void gfxCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes, VkShaderStageFlags* pStages, uint32_t* pCounts,
                      uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges, GfxLayout* pLayout)
 {
-    GFX_RESET(pLayout);
-
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
     }
@@ -2408,6 +2542,15 @@ static void createShader(GfxShader* pShader, const void* pCode, size_t codeSize,
     pShader->pCode = GFX_MALLOC(codeSize);
     memcpy(pShader->pCode, pCode, codeSize);
 
+    // Take our own copies, so that createInfo does not point into the layout
+    // until the shader is built
+    pShader->setLayout = pLayout->setLayout;
+    if (pLayout->pushConstantRangeCount) {
+        size_t pushConstantRangeSize = pLayout->pushConstantRangeCount * sizeof *pShader->pPushConstantRanges;
+        pShader->pPushConstantRanges = GFX_MALLOC(pushConstantRangeSize);
+        memcpy(pShader->pPushConstantRanges, pLayout->pPushConstantRanges, pushConstantRangeSize);
+    }
+
     pShader->createInfo = (VkShaderCreateInfoEXT){
         .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
         .flags = 0,
@@ -2418,9 +2561,9 @@ static void createShader(GfxShader* pShader, const void* pCode, size_t codeSize,
         .pCode = pShader->pCode,
         .pName = "main",
         .setLayoutCount = 1,
-        .pSetLayouts = &pLayout->setLayout,
+        .pSetLayouts = &pShader->setLayout,
         .pushConstantRangeCount = pLayout->pushConstantRangeCount,
-        .pPushConstantRanges = pLayout->pPushConstantRanges,
+        .pPushConstantRanges = pShader->pPushConstantRanges,
         .pSpecializationInfo = NULL,
     };
 }
@@ -2436,8 +2579,6 @@ void gfxCreateShader(const void* pCode, size_t codeSize, VkShaderStageFlagBits s
 void gfxCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
                                  const GfxLayout* pLayout, GfxShader* pShader)
 {
-    GFX_RESET(pShader);
-
     size_t sz = strlen(pPath) + 1;
 
     *pShader = (GfxShader){
@@ -2594,11 +2735,11 @@ void gfxDestroyShader(GfxShader* pShader)
 {
     vkDeviceWaitIdle(gfxDevice.device);
 
-    VK_LOAD(vkDestroyShaderEXT);
-    XvkDestroyShaderEXT(gfxDevice.device, pShader->shader, NULL);
+    gfxDevice.fn.vkDestroyShaderEXT(gfxDevice.device, pShader->shader, NULL);
 
     GFX_FREE(pShader->pCode);
     GFX_FREE(pShader->pPath);
+    GFX_FREE(pShader->pPushConstantRanges);
 
     GFX_RESET(pShader);
 }
@@ -2609,8 +2750,7 @@ void gfxDestroyShader(GfxShader* pShader)
 void gfxBuildShader(GfxShader* pShader)
 {
     GFX_INFO("Building shader: %s", GFX_SHADER_NAME(pShader));
-    VK_LOAD(vkCreateShadersEXT);
-    VK_CHECK(XvkCreateShadersEXT(gfxDevice.device, 1, &pShader->createInfo, NULL, &pShader->shader));
+    VK_CHECK(gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, 1, &pShader->createInfo, NULL, &pShader->shader));
 }
 
 void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
@@ -2633,8 +2773,7 @@ void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
 
     VkShaderEXT shaders[GFX_ARRAY_LEN(createInfos)];
 
-    VK_LOAD(vkCreateShadersEXT);
-    VK_CHECK(XvkCreateShadersEXT(gfxDevice.device, GFX_ARRAY_LEN(createInfos), createInfos, NULL, shaders));
+    VK_CHECK(gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, GFX_ARRAY_LEN(createInfos), createInfos, NULL, shaders));
 
     pVertexShader->shader = shaders[0];
     pFragmentShader->shader = shaders[1];
@@ -2642,48 +2781,54 @@ void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
 
 void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader)
 {
-    VK_LOAD(vkCmdBindShadersEXT);
-    XvkCmdBindShadersEXT(cmd, 1, &pShader->createInfo.stage, &pShader->shader);
+    gfxDevice.fn.vkCmdBindShadersEXT(cmd, 1, &pShader->createInfo.stage, &pShader->shader);
 }
 
-void gfxCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet,
+                            uint32_t vertexBindingDescriptionCount,
                             const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
                             uint32_t vertexAttributeDescriptionCount,
                             const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
 {
-    VK_LOAD(vkCmdSetVertexInputEXT);
-    VK_LOAD(vkCmdSetRasterizationSamplesEXT);
-    VK_LOAD(vkCmdSetSampleMaskEXT);
-    VK_LOAD(vkCmdSetAlphaToCoverageEnableEXT);
-    VK_LOAD(vkCmdSetPolygonModeEXT);
-    VK_LOAD(vkCmdSetLogicOpEnableEXT);
-    VK_LOAD(vkCmdSetColorBlendEnableEXT);
-    VK_LOAD(vkCmdSetColorWriteMaskEXT);
+    if (!pAttachmentSet || !pAttachmentSet->colorAttachmentCount) {
+        GFX_ERROR("An attachment set with at least one color attachment is required");
+        return;
+    }
+
+    // Viewport and sample count follow the attachments actually being rendered
+    // to, which is not necessarily the swapchain
+    const GfxImage* pFirstColorAttachment = &pAttachmentSet->pColorAttachments[0];
+    const VkExtent2D extent = {.width = pFirstColorAttachment->width, .height = pFirstColorAttachment->height};
+    const VkSampleCountFlagBits samples =
+        pFirstColorAttachment->samples ? pFirstColorAttachment->samples : VK_SAMPLE_COUNT_1_BIT;
 
     const VkViewport viewport = {
-        .width = (float)gfxSwapchain.extent.width,
-        .height = (float)gfxSwapchain.extent.height,
+        .width = (float)extent.width,
+        .height = (float)extent.height,
         .minDepth = 0.0f,
         .maxDepth = 1.0f,
     };
-    const VkRect2D scissor = {.extent = gfxSwapchain.extent};
+    const VkRect2D scissor = {.extent = extent};
     vkCmdSetViewportWithCount(cmd, 1, &viewport);
     vkCmdSetScissorWithCount(cmd, 1, &scissor);
     vkCmdSetRasterizerDiscardEnable(cmd, VK_FALSE);
 
-    XvkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
-                            vertexAttributeDescriptionCount, vertexAttributeDescriptions);
+    gfxDevice.fn.vkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
+                                        vertexAttributeDescriptionCount, vertexAttributeDescriptions);
     vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
 
-    const VkSampleMask sampleMask = 0x1;
-    XvkCmdSetRasterizationSamplesEXT(cmd, VK_SAMPLE_COUNT_1_BIT);
-    XvkCmdSetSampleMaskEXT(cmd, VK_SAMPLE_COUNT_1_BIT, &sampleMask);
-    XvkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
-    XvkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
-    vkCmdSetCullMode(cmd, VK_FALSE);
+    const VkSampleMask sampleMask = ~0u;
+    gfxDevice.fn.vkCmdSetRasterizationSamplesEXT(cmd, samples);
+    gfxDevice.fn.vkCmdSetSampleMaskEXT(cmd, samples, &sampleMask);
+    gfxDevice.fn.vkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
+    gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
+    vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+
+    // Reverse Z: the depth attachment is cleared to 0.0 and greater wins
     vkCmdSetDepthTestEnable(cmd, VK_TRUE);
+    vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
     vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_GREATER);
     vkCmdSetDepthBoundsTestEnable(cmd, VK_FALSE);
     vkCmdSetDepthBiasEnable(cmd, VK_FALSE);
@@ -2691,12 +2836,12 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescripti
 
     const VkBool32 colorBlendEnable = VK_FALSE;
     const VkColorComponentFlags colorComponents =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_A_BIT;
-    XvkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
-    XvkCmdSetColorBlendEnableEXT(cmd, 0, 1, &colorBlendEnable);
-    XvkCmdSetColorWriteMaskEXT(cmd, 0, 1, &colorComponents);
-
-    vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    gfxDevice.fn.vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
+    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
+        gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, i, 1, &colorBlendEnable);
+        gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, i, 1, &colorComponents);
+    }
 }
 
 #endif

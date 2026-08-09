@@ -91,17 +91,18 @@ static void createDevice(VkSurfaceKHR surface)
 
 static void createAttachments(GfxImage* pColorAttachment, GfxImage* pDepthAttachment)
 {
-    gfxCreateImage(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 1, VK_SAMPLE_COUNT_1_BIT,
-                   VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+    VkExtent3D extent = {.width = gfxSwapchain.extent.width, .height = gfxSwapchain.extent.height, .depth = 1};
+
+    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, VK_IMAGE_TYPE_2D,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
-    gfxCreateImageView(pColorAttachment, VK_IMAGE_ASPECT_COLOR_BIT);
+    gfxCreateImageView(pColorAttachment, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D);
 
     VkFormat depthFormat = gfxFindDepthFormat();
-    gfxCreateImage(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat,
-                   VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, VK_IMAGE_TYPE_2D,
                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pDepthAttachment);
-    gfxCreateImageView(pDepthAttachment, VK_IMAGE_ASPECT_DEPTH_BIT);
+    gfxCreateImageView(pDepthAttachment, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_VIEW_TYPE_2D);
 
     // Transition depth attachment for depth use
     VkImageSubresourceRange depthSubresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
@@ -161,7 +162,7 @@ static void createVertexAndIndexBuffers(GfxBuffer* pVertexBuffer, GfxBuffer* pIn
     gfxCopyBufferFromHost(pIndexBuffer, indices, sizeof(indices), 0);
 }
 
-static void cmdSetRenderingStates(VkCommandBuffer cmd)
+static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
 {
     const VkVertexInputBindingDescription2EXT vertexBindingDescription[] = {{
         .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
@@ -188,7 +189,7 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd)
         },
     };
 
-    gfxCmdSetDefaultStates(cmd, GFX_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
+    gfxCmdSetDefaultStates(cmd, pAttachmentSet, GFX_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
                            GFX_ARRAY_LEN(vertexAttributeDescription), vertexAttributeDescription);
 }
 
@@ -281,19 +282,20 @@ int main()
         VkClearValue clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
         gfxCmdBeginRendering(cmd, &attachment, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
 
-        // Set rendering states
-        cmdSetRenderingStates(cmd);
-        vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
+        // Set rendering states. Depth writes are on by default.
+        cmdSetRenderingStates(cmd, &attachment);
 
-        // Push descriptor
+        // Push descriptor. The buffer infos have to outlive the writes.
+        VkDescriptorBufferInfo bufferInfos[2];
         VkWriteDescriptorSet writes[] = {
-            gfxGetBufferDescriptor(&cameraBuffer, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE),
-            gfxGetBufferDescriptor(&modelBuffer, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE),
+            gfxGetBufferDescriptor(&cameraBuffer, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE,
+                                   &bufferInfos[0]),
+            gfxGetBufferDescriptor(&modelBuffer, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE,
+                                   &bufferInfos[1]),
             gfxGetTextureDescriptor(&texture, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
         };
-        VK_LOAD(vkCmdPushDescriptorSetKHR);
-        XvkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipelineLayout, 0,
-                                   GFX_ARRAY_LEN(writes), writes);
+        gfxDevice.fn.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipelineLayout, 0,
+                                               GFX_ARRAY_LEN(writes), writes);
 
         // Bind shaders
         gfxCmdBindShader(cmd, &vertexShader);
