@@ -254,7 +254,7 @@ int main()
         glfwSetTime(0.0);
 
         // Wait for shared resources to be available
-        ygWaitForFence();
+        gfxWaitForFence();
 
         // Rotate model
         angle += delta;
