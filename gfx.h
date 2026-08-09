@@ -1,4 +1,4 @@
-/* Copyright 2025 Rikard Olajos
+﻿/* Copyright 2025 Rikard Olajos
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the “Software”), to deal
@@ -56,7 +56,6 @@ extern "C" {
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
-#include <memory.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -64,7 +63,7 @@ extern "C" {
 #include <string.h>
 
 #if GFX_LINUX
-#include <csignal>
+#include <signal.h>
 #endif
 
 // Get the length of an array. Don't use for pointers!
@@ -86,7 +85,7 @@ extern "C" {
 
 // Error handling and logging //
 
-struct VulkanResult {
+static const struct GfxVulkanResult {
     VkResult result;
     const char* string;
 } gfxVulkanResults[] = {
@@ -135,37 +134,45 @@ struct VulkanResult {
 };
 
 // Log an info message
-#define GFX_INFO(fmt, ...) fprintf(stdout, "INFO: " fmt "\n", ##__VA_ARGS__);
+#define GFX_INFO(fmt, ...)                                                                                             \
+    do {                                                                                                               \
+        fprintf(stdout, "INFO: " fmt "\n", ##__VA_ARGS__);                                                             \
+    } while (0)
 
 #ifdef NDEBUG
-#define GFX_DEBUG(fmt, ...)
+#define GFX_DEBUG(fmt, ...)                                                                                            \
+    do {                                                                                                               \
+    } while (0)
 #else
 // Log a debug message. Only visible if NDEBUG is not defined.
-#define GFX_DEBUG(fmt, ...) fprintf(stdout, "\x1B[1;92mDEBUG: \x1B[0m" fmt "\n", ##__VA_ARGS__);
+#define GFX_DEBUG(fmt, ...)                                                                                            \
+    do {                                                                                                               \
+        fprintf(stdout, "\x1B[1;92mDEBUG: \x1B[0m" fmt "\n", ##__VA_ARGS__);                                           \
+    } while (0)
 #endif
 
 // Log a warning message
 #define GFX_WARNING(fmt, ...)                                                                                          \
-    fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);
+    do {                                                                                                               \
+        fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);              \
+    } while (0)
 
 #ifdef NDEBUG
-// Log an error message
-#define GFX_ERROR(fmt, ...)                                                                                            \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
-    abort();
-#else
-#if GFX_WINDOWS
-// Log an error message. Will cause a breakpoint if NDEBUG is not defined.
-#define GFX_ERROR(fmt, ...)                                                                                            \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
-    __debugbreak();
+// Break into the debugger, or abort if there is none to break into
+#define GFX_BREAK() abort()
+#elif GFX_WINDOWS
+#define GFX_BREAK() __debugbreak()
 #elif GFX_LINUX
-// Log an error message. Will cause a SIGTRAP if NDEBUG is not defined.
+#define GFX_BREAK() raise(SIGTRAP)
+#endif
+
+// Log an error message. Will cause a breakpoint (SIGTRAP on Linux) if NDEBUG is
+// not defined, and abort otherwise.
 #define GFX_ERROR(fmt, ...)                                                                                            \
-    fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                    \
-    std::raise(SIGTRAP);
-#endif
-#endif
+    do {                                                                                                               \
+        fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                \
+        GFX_BREAK();                                                                                                   \
+    } while (0)
 
 // Get the string representation of a VkResult. Returns "VK_RESULT_UNKNOWN" for
 // codes that are not in the table.
@@ -236,7 +243,7 @@ typedef struct GfxSwapchain {
 
     void (*framebufferSizeCallback)(uint32_t*, uint32_t*);
 
-    struct SupportDetails {
+    struct GfxSwapchainSupportDetails {
         VkSurfaceCapabilitiesKHR capabilities;
         uint32_t formatCount;
         VkSurfaceFormatKHR* formats;
@@ -428,7 +435,7 @@ void gfxRecreateSwapchain();
 /// Wait for the fence of the current frame in flight to be signaled.
 /// Call this before accessing any shared resources.
 /// </summary>
-void ygWaitForFence();
+void gfxWaitForFence();
 
 /// <summary>
 /// Acquire a new image from the swapchain. This call will block until an image
@@ -591,44 +598,44 @@ void gfxSetTextureAddressMode(GfxTexture* pTexture, VkSamplerAddressMode modeU, 
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
 /// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
 /// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
-/// <param name="pAttachment">Where the created pass will be stored</param>
+/// <param name="pAttachmentSet">Where the created attachment set will be stored</param>
 void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachments, GfxImage* pDepthAttachment,
-                         GfxImage* pResolveAttachment, GfxAttachment* pAttachment);
+                         GfxImage* pResolveAttachment, GfxAttachment* pAttachmentSet);
 
 /// <summary>
 /// Release resource for an attachment set.
 /// </summary>
-/// <param name="pAttachment">Pass to destroy</param>
-void gfxDestroyAttachment(GfxAttachment* pAttachment);
+/// <param name="pAttachmentSet">Attachment set to destroy</param>
+void gfxDestroyAttachment(GfxAttachment* pAttachmentSet);
 
 /// <summary>
 /// Recreate a pass if attachments changed. Same as calling gfxDestroyAttachment()
 /// followed by gfxCreateAttachment().
 /// </summary>
-/// <param name="pAttachmentSet">Pass to recreate</param>
+/// <param name="pAttachmentSet">Attachment set to recreate</param>
 /// <param name="colorAttachmentCount">Number of color attachments</param>
 /// <param name="pColorAttachments">List of images that should be used as color attachments</param>
 /// <param name="pDepthAttachment">Depth attachment to use, can be NULL</param>
 /// <param name="pResolveAttachment">Resolve attachment to use, can be NULL</param>
-void gfxRecreateAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
+void gfxRecreateAttachment(GfxAttachment* pAttachmentSet, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
                            GfxImage* pDepthAttachment, GfxImage* pResolveAttachment);
 
 /// <summary>
 /// Begin dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
-/// <param name="pAttachment">Pass to use</param>
+/// <param name="pAttachmentSet">Attachment set to use</param>
 /// <param name="clearValue">Clear value for attachments</param>
 /// <param name="loadOp">Load operation for attachments</param>
-void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkClearValue clearValue,
+void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
                           VkAttachmentLoadOp loadOp);
 
 /// <summary>
 /// End dynamic rendering using an attachment set.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
-/// <param name="pAttachment">Pass to use</param>
-void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment);
+/// <param name="pAttachmentSet">Attachment set to use</param>
+void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet);
 
 /// <summary>
 /// Create a new layout.
@@ -718,7 +725,7 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, uint32_t vertexBindingDescripti
 /// </summary>
 /// <param name="sz">Size in bytes to allocate</param>
 /// <returns>Pointer to allocated memory</returns>
-inline void* gfxCheckedMalloc(size_t sz)
+static inline void* gfxCheckedMalloc(size_t sz)
 {
     void* p = malloc(sz);
     if (!p) {
@@ -733,7 +740,7 @@ inline void* gfxCheckedMalloc(size_t sz)
 /// <param name="value">Value to align</param>
 /// <param name="alignment">Required alignment</param>
 /// <returns></returns>
-inline VkDeviceSize gfxAlignTo(VkDeviceSize value, VkDeviceSize alignment)
+static inline VkDeviceSize gfxAlignTo(VkDeviceSize value, VkDeviceSize alignment)
 {
     return (value + alignment - 1) & ~(alignment - 1);
 }
@@ -742,7 +749,7 @@ inline VkDeviceSize gfxAlignTo(VkDeviceSize value, VkDeviceSize alignment)
 /// Create and begin a new one-time-use command buffer.
 /// </summary>
 /// <returns>A new command buffer</returns>
-inline VkCommandBuffer gfxCmdBegin()
+static inline VkCommandBuffer gfxCmdBegin()
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
@@ -772,7 +779,7 @@ inline VkCommandBuffer gfxCmdBegin()
 /// Submit and destroy a one-time-use command buffer.
 /// </summary>
 /// <param name="cmd">Command buffer to submit and destroy</param>
-inline void gfxCmdEnd(VkCommandBuffer cmd)
+static inline void gfxCmdEnd(VkCommandBuffer cmd)
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
@@ -798,7 +805,7 @@ inline void gfxCmdEnd(VkCommandBuffer cmd)
 /// <param name="typeFilter">Type filter to use</param>
 /// <param name="properties">Memory property flags</param>
 /// <returns>Index to memory type</returns>
-inline uint32_t gfxFindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
+static inline uint32_t gfxFindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties)
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
@@ -824,8 +831,8 @@ inline uint32_t gfxFindMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags pro
 /// <param name="tiling">Required image tiling</param>
 /// <param name="features"Format feature flags></param>
 /// <returns>A supported format</returns>
-inline VkFormat gfxFindSupportedFormat(VkFormat* pCandidates, uint32_t candidateCount, VkImageTiling tiling,
-                                       VkFormatFeatureFlags features)
+static inline VkFormat gfxFindSupportedFormat(VkFormat* pCandidates, uint32_t candidateCount, VkImageTiling tiling,
+                                              VkFormatFeatureFlags features)
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
@@ -850,7 +857,7 @@ inline VkFormat gfxFindSupportedFormat(VkFormat* pCandidates, uint32_t candidate
 /// Find a depth format supported by the current device.
 /// </summary>
 /// <returns>A supported depth format</returns>
-inline VkFormat gfxFindDepthFormat()
+static inline VkFormat gfxFindDepthFormat()
 {
     VkFormat candidates[] = {
         VK_FORMAT_D32_SFLOAT,
@@ -875,9 +882,9 @@ inline VkFormat gfxFindDepthFormat()
 /// <param name="image">Image to use</param>
 /// <param name="pSubresourceRange">Subresource range to use, can be NULL in which case all mip levels and array
 /// layers of the color aspect are used.</param>
-inline void gfxImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-                            VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout oldLayout,
-                            VkImageLayout newLayout, VkImage image, VkImageSubresourceRange* pSubresourceRange)
+static inline void gfxImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                                   VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess, VkImageLayout oldLayout,
+                                   VkImageLayout newLayout, VkImage image, VkImageSubresourceRange* pSubresourceRange)
 {
     VkImageSubresourceRange defaultSubresourceRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -916,7 +923,7 @@ inline void gfxImageBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage,
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pImage">Image to transition</param>
-inline void gfxTransitionForColorAttachment(VkCommandBuffer cmd, GfxImage* pImage)
+static inline void gfxTransitionForColorAttachment(VkCommandBuffer cmd, GfxImage* pImage)
 {
     gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -930,7 +937,7 @@ inline void gfxTransitionForColorAttachment(VkCommandBuffer cmd, GfxImage* pImag
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pImage">Image to transition</param>
-inline void gfxTransitionForBlitting(VkCommandBuffer cmd, GfxImage* pImage)
+static inline void gfxTransitionForBlitting(VkCommandBuffer cmd, GfxImage* pImage)
 {
     gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
@@ -945,8 +952,10 @@ inline void gfxTransitionForBlitting(VkCommandBuffer cmd, GfxImage* pImage)
 
 // Monolithic global variables //
 
-static GfxDevice gfxDevice;
-static GfxSwapchain gfxSwapchain;
+// Definitions for the extern declarations above. These must not be static, so
+// that every translation unit including this header shares the same objects.
+GfxDevice gfxDevice;
+GfxSwapchain gfxSwapchain;
 
 
 // Helper macros //
@@ -1621,14 +1630,19 @@ void gfxRecreateSwapchain()
     gfxSwapchain.recreated = true;
 }
 
+void gfxWaitForFence()
+{
+    VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex], VK_TRUE,
+                             UINT64_MAX));
+}
+
 VkCommandBuffer gfxAcquireNextImage()
 {
     // The caller has had a full iteration to react to a recreated swapchain
     gfxSwapchain.recreated = false;
 
     // Wait for the current frame to not be in flight
-    VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex], VK_TRUE,
-                             UINT64_MAX));
+    gfxWaitForFence();
     VK_CHECK(vkResetFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex]));
 
     // Acquire index of next image in the swapchain
@@ -2215,10 +2229,10 @@ void gfxSetTextureAddressMode(GfxTexture* pTexture, VkSamplerAddressMode modeU, 
     createSampler(pTexture);
 }
 
-static void createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
-                             GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
+static void createAttachmentSet(GfxAttachment* pAttachmentSet, uint32_t colorAttachmentCount,
+                                GfxImage* pColorAttachments, GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
 {
-    *pAttachment = (GfxAttachment){
+    *pAttachmentSet = (GfxAttachment){
         .pRenderingAttachmentInfos = GFX_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
         .pFormats = GFX_MALLOC(colorAttachmentCount * sizeof(VkFormat)),
         .pColorAttachments = pColorAttachments,
@@ -2245,36 +2259,36 @@ static void createAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmen
     pAttachmentSet->pipelineRenderingCreateInfo = (VkPipelineRenderingCreateInfo){
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = colorAttachmentCount,
-        .pColorAttachmentFormats = pAttachment->pFormats,
+        .pColorAttachmentFormats = pAttachmentSet->pFormats,
         .depthAttachmentFormat = pDepthAttachment ? pDepthAttachment->format : VK_FORMAT_UNDEFINED,
     };
 }
 
 void gfxCreateAttachment(uint32_t colorAttachmentCount, GfxImage* pColorAttachments, GfxImage* pDepthAttachment,
-                        GfxImage* pResolveAttachment, GfxAttachment* pAttachment)
+                         GfxImage* pResolveAttachment, GfxAttachment* pAttachmentSet)
 {
-    GFX_RESET(pAttachment);
+    GFX_RESET(pAttachmentSet);
 
     createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void gfxDestroyAttachment(GfxAttachment* pAttachment)
+void gfxDestroyAttachment(GfxAttachment* pAttachmentSet)
 {
-    GFX_FREE(pAttachment->pRenderingAttachmentInfos);
-    GFX_FREE(pAttachment->pFormats);
+    GFX_FREE(pAttachmentSet->pRenderingAttachmentInfos);
+    GFX_FREE(pAttachmentSet->pFormats);
 
-    GFX_RESET(pAttachment);
+    GFX_RESET(pAttachmentSet);
 }
 
-void gfxRecreateAttachment(GfxAttachment* pAttachment, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
+void gfxRecreateAttachment(GfxAttachment* pAttachmentSet, uint32_t colorAttachmentCount, GfxImage* pColorAttachments,
                            GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
 {
-    GFX_FREE(pAttachment->pRenderingAttachmentInfos);
-    GFX_FREE(pAttachment->pFormats);
-    createAttachment(pAttachment, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
+    GFX_FREE(pAttachmentSet->pRenderingAttachmentInfos);
+    GFX_FREE(pAttachmentSet->pFormats);
+    createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment, VkClearValue clearValue,
+void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
                           VkAttachmentLoadOp loadOp)
 {
     for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
@@ -2286,7 +2300,7 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment,
     if (pAttachmentSet->pDepthAttachment) {
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView = pAttachment->pDepthAttachment->imageView,
+            .imageView = pAttachmentSet->pDepthAttachment->imageView,
             .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -2312,9 +2326,9 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment,
     vkCmdBeginRendering(cmd, &renderingInfo);
 }
 
-void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment)
+void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
 {
-    GFX_UNUSED(pAttachment);
+    GFX_UNUSED(pAttachmentSet);
     vkCmdEndRendering(cmd);
 }
 
@@ -2384,8 +2398,8 @@ void gfxDestroyLayout(GfxLayout* pLayout)
     GFX_RESET(pLayout);
 }
 
-void createShader(GfxShader* pShader, const void* pCode, size_t codeSize, VkShaderStageFlagBits stage,
-                  VkShaderStageFlags nextStage, const GfxLayout* pLayout)
+static void createShader(GfxShader* pShader, const void* pCode, size_t codeSize, VkShaderStageFlagBits stage,
+                         VkShaderStageFlags nextStage, const GfxLayout* pLayout)
 {
     if (!gfxDevice.device) {
         GFX_ERROR("Device not initialized");
@@ -2430,8 +2444,7 @@ void gfxCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
         .pPath = GFX_MALLOC(sz),
     };
 
-    memset(pShader->pPath, 0, sz);
-    strcpy_s(pShader->pPath, sz, pPath);
+    memcpy(pShader->pPath, pPath, sz);
 
     // Read file
     FILE* file = fopen(pShader->pPath, "rb");

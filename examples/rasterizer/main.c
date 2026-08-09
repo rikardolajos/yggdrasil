@@ -1,6 +1,6 @@
 #define GFX_USE_STB_IMAGE
 #define GFX_IMPLEMENTATION
-#include "yggdrasil.h"
+#include "gfx.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
