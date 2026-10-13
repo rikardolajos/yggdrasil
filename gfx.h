@@ -589,6 +589,100 @@ typedef struct GfxRayTracingPipeline {
     VkStridedDeviceAddressRegionKHR callableRegion;
 } GfxRayTracingPipeline;
 
+// Most resources a render graph pass can read and write
+#ifndef GFX_MAX_PASS_RESOURCES
+#define GFX_MAX_PASS_RESOURCES 8
+#endif
+
+// Describes an image owned by a render graph. The usage flags decide how passes
+// access it: a graphics pass writes an image with attachment usage as an
+// attachment and any other image as a storage image, and a pass reads an image
+// as sampled if it has sampled usage and as a storage image otherwise. Leave
+// width and height as 0 to follow the size of the swapchain.
+typedef struct GfxGraphImageDesc {
+    const char* pName;
+    VkFormat format;
+    VkImageUsageFlags usage;
+    uint32_t width;
+    uint32_t height;
+    VkClearColorValue clearColor; // Color attachments are cleared to this, depth to GFX_DEPTH_CLEAR
+} GfxGraphImageDesc;
+
+// A graphics pass renders to the color and depth attachments among its outputs,
+// a compute pass dispatches or traces rays and writes its outputs as storage
+enum GfxPassType {
+    GFX_PASS_GRAPHICS,
+    GFX_PASS_COMPUTE,
+};
+
+// Records the commands of a pass. A graphics pass is called between the
+// beginning and end of rendering, with the attachments it renders to; a
+// compute pass is called with NULL.
+typedef void (*GfxPassFunction)(VkCommandBuffer cmd, const GfxAttachment* pAttachment, void* pUserData);
+
+// Describes a pass of a render graph by name, the resources it reads and
+// writes, and the function recording it. The color attachments of a graphics
+// pass are its color outputs, in the order they are listed.
+typedef struct GfxPassDesc {
+    const char* pName;
+    enum GfxPassType type;
+    const char* inputs[GFX_MAX_PASS_RESOURCES];
+    const char* outputs[GFX_MAX_PASS_RESOURCES];
+    GfxPassFunction function;
+    void* pUserData;
+} GfxPassDesc;
+
+typedef struct GfxGraphResource {
+    char* pName;
+    GfxImage image;           // Owned by the graph, for images
+    const GfxBuffer* pBuffer; // Owned by the application, for buffers
+    GfxGraphImageDesc desc;
+    VkImageLayout layout; // Layout the image is in where recording has got to
+    bool written;         // Whether the last access was a write
+} GfxGraphResource;
+
+typedef struct GfxGraphPass {
+    char* pName;
+    enum GfxPassType type;
+    char* inputNames[GFX_MAX_PASS_RESOURCES];
+    char* outputNames[GFX_MAX_PASS_RESOURCES];
+    uint32_t inputCount;
+    uint32_t outputCount;
+    uint32_t inputs[GFX_MAX_PASS_RESOURCES]; // Resource indices, resolved when compiled
+    uint32_t outputs[GFX_MAX_PASS_RESOURCES];
+    GfxPassFunction function;
+    void* pUserData;
+    GfxAttachment attachment; // Graphics passes only
+    GfxImage* pColorImages;   // Copies of the color attachments, as GfxAttachment needs them adjacent
+    GfxImage depthImage;
+    bool hasDepth;
+} GfxGraphPass;
+
+// Render graph that owns the images a frame is built from, and records the
+// passes that read and write them in the order the data flows between them.
+// Passes can be added in any order; every layout transition and barrier
+// between passes, and between frames, is recorded by the graph, and graphics
+// passes are rendered without any attachment handling by the application.
+// Images that follow the swapchain size are recreated when it changes, and
+// since resources are attached to shaders by pointer, shaders pick the new
+// images up on their own.
+//
+// Create a graph with gfxCreateRenderGraph() and add images with
+// gfxAddGraphImage(), buffers with gfxAddGraphBuffer() and passes with
+// gfxAddGraphPass(). Mark the image that is presented with
+// gfxSetGraphOutput(), and record a frame with gfxCmdExecuteRenderGraph(). A
+// resource can only be written by one pass. Release resources with
+// gfxDestroyRenderGraph().
+typedef struct GfxRenderGraph {
+    uint32_t resourceCount;
+    GfxGraphResource** ppResources; // Allocated one by one, so that images stay at the same address
+    uint32_t passCount;
+    GfxGraphPass* pPasses;
+    uint32_t* pOrder; // Pass indices in execution order
+    uint32_t output;  // Index of the presented image, UINT32_MAX if none
+    bool compiled;
+} GfxRenderGraph;
+
 
 // Monolithic global variables //
 
@@ -1160,6 +1254,71 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
 /// </summary>
 /// <param name="vsync">Whether to wait for vertical blank when presenting</param>
 void gfxSetVsync(bool vsync);
+
+/// <summary>
+/// Create an empty render graph.
+/// </summary>
+/// <param name="pGraph">Where the created render graph will be stored</param>
+void gfxCreateRenderGraph(GfxRenderGraph* pGraph);
+
+/// <summary>
+/// Release resources for a render graph, including the images it owns.
+/// </summary>
+/// <param name="pGraph">Render graph to destroy</param>
+void gfxDestroyRenderGraph(GfxRenderGraph* pGraph);
+
+/// <summary>
+/// Add an image to a render graph. The image is created right away, so that it
+/// can be attached to shaders, and stays at the same address for as long as the
+/// graph exists, also when it is recreated for a new swapchain size.
+/// </summary>
+/// <param name="pGraph">Render graph to use</param>
+/// <param name="pDesc">Description of the image</param>
+/// <returns>The image</returns>
+GfxImage* gfxAddGraphImage(GfxRenderGraph* pGraph, const GfxGraphImageDesc* pDesc);
+
+/// <summary>
+/// Add a buffer to a render graph, so that passes reading and writing it are
+/// ordered and synchronized. The buffer stays owned by the application.
+/// </summary>
+/// <param name="pGraph">Render graph to use</param>
+/// <param name="pName">Name passes refer to the buffer by</param>
+/// <param name="pBuffer">Buffer to add, must stay at the same address while the graph exists</param>
+void gfxAddGraphBuffer(GfxRenderGraph* pGraph, const char* pName, const GfxBuffer* pBuffer);
+
+/// <summary>
+/// Add a pass to a render graph. The order passes are added in does not
+/// matter, they run after the passes that write what they read.
+/// </summary>
+/// <param name="pGraph">Render graph to use</param>
+/// <param name="pDesc">Description of the pass</param>
+void gfxAddGraphPass(GfxRenderGraph* pGraph, const GfxPassDesc* pDesc);
+
+/// <summary>
+/// Set the image that leaves the graph, which is left in
+/// VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL ready for gfxPresent().
+/// </summary>
+/// <param name="pGraph">Render graph to use</param>
+/// <param name="pName">Name of the image</param>
+void gfxSetGraphOutput(GfxRenderGraph* pGraph, const char* pName);
+
+/// <summary>
+/// Get an image of a render graph by name.
+/// </summary>
+/// <param name="pGraph">Render graph to use</param>
+/// <param name="pName">Name of the image</param>
+/// <returns>The image, or NULL if the graph has no image with that name</returns>
+GfxImage* gfxGetGraphImage(const GfxRenderGraph* pGraph, const char* pName);
+
+/// <summary>
+/// Record every pass of a render graph, in the order the data flows between
+/// them, with the transitions and barriers they need. The graph is compiled
+/// the first time, and images following the swapchain size are recreated if it
+/// changed.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pGraph">Render graph to execute</param>
+void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph);
 
 // Inlined helper functions //
 
@@ -2307,6 +2466,18 @@ VkCommandBuffer gfxAcquireNextImage()
     // The caller has had a full iteration to react to a recreated swapchain
     gfxSwapchain.recreated = false;
 
+    // Drivers are allowed to keep presenting to a resized window instead of
+    // reporting the swapchain out of date, so the size is compared here. A
+    // surface without a fixed size reports UINT32_MAX, and a minimized window
+    // reports zero, and neither is a reason to recreate.
+    VkSurfaceCapabilitiesKHR capabilities;
+    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(gfxDevice.physicalDevice, gfxDevice.surface, &capabilities));
+    VkExtent2D currentExtent = capabilities.currentExtent;
+    if (currentExtent.width != UINT32_MAX && currentExtent.width && currentExtent.height &&
+        (currentExtent.width != gfxSwapchain.extent.width || currentExtent.height != gfxSwapchain.extent.height)) {
+        gfxRecreateSwapchain();
+    }
+
     // Wait for the current frame to not be in flight
     gfxWaitForFence();
     VK_CHECK(vkResetFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex]));
@@ -3149,20 +3320,36 @@ void gfxRecreateAttachment(GfxAttachment* pAttachmentSet, uint32_t colorAttachme
     createAttachmentSet(pAttachmentSet, colorAttachmentCount, pColorAttachments, pDepthAttachment, pResolveAttachment);
 }
 
-void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
-                          VkAttachmentLoadOp loadOp)
+static bool hasStencil(VkFormat format)
 {
-    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
-        pAttachmentSet->pRenderingAttachmentInfos[i].clearValue = clearValue;
-        pAttachmentSet->pRenderingAttachmentInfos[i].loadOp = loadOp;
-    }
+    return format == VK_FORMAT_D16_UNORM_S8_UINT || format == VK_FORMAT_D24_UNORM_S8_UINT ||
+           format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+}
 
+static bool isDepthFormat(VkFormat format)
+{
+    return format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_X8_D24_UNORM_PACK32 || format == VK_FORMAT_D32_SFLOAT ||
+           hasStencil(format);
+}
+
+// Layout a depth attachment is rendered in, which has to cover stencil too if
+// the format has it
+static VkImageLayout depthAttachmentLayout(VkFormat format)
+{
+    return hasStencil(format) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                              : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+}
+
+// Begin rendering with the clear values and load operations already in the
+// attachment set
+static void beginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
+{
     VkRenderingAttachmentInfo depthAttachmentInfo;
     if (pAttachmentSet->pDepthAttachment) {
         depthAttachmentInfo = (VkRenderingAttachmentInfo){
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = pAttachmentSet->pDepthAttachment->imageView,
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            .imageLayout = depthAttachmentLayout(pAttachmentSet->pDepthAttachment->format),
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .clearValue.depthStencil = {.depth = GFX_DEPTH_CLEAR, .stencil = 0},
@@ -3185,6 +3372,17 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentS
     };
 
     vkCmdBeginRendering(cmd, &renderingInfo);
+}
+
+void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
+                          VkAttachmentLoadOp loadOp)
+{
+    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
+        pAttachmentSet->pRenderingAttachmentInfos[i].clearValue = clearValue;
+        pAttachmentSet->pRenderingAttachmentInfos[i].loadOp = loadOp;
+    }
+
+    beginRendering(cmd, pAttachmentSet);
 }
 
 void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
@@ -5752,6 +5950,496 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
         gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, i, 1, &colorBlendEnable);
         gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, i, 1, &colorBlendEquation);
         gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, i, 1, &colorComponents);
+    }
+}
+
+
+// Render graph //
+
+void gfxCreateRenderGraph(GfxRenderGraph* pGraph)
+{
+    GFX_RESET(pGraph);
+    pGraph->output = UINT32_MAX;
+}
+
+static void destroyGraphPassAttachments(GfxGraphPass* pPass)
+{
+    if (pPass->pColorImages) {
+        gfxDestroyAttachment(&pPass->attachment);
+        GFX_FREE(pPass->pColorImages);
+        pPass->pColorImages = NULL;
+    }
+}
+
+void gfxDestroyRenderGraph(GfxRenderGraph* pGraph)
+{
+    for (uint32_t i = 0; i < pGraph->passCount; i++) {
+        GfxGraphPass* pPass = &pGraph->pPasses[i];
+        destroyGraphPassAttachments(pPass);
+        GFX_FREE(pPass->pName);
+        for (uint32_t j = 0; j < pPass->inputCount; j++) {
+            GFX_FREE(pPass->inputNames[j]);
+        }
+        for (uint32_t j = 0; j < pPass->outputCount; j++) {
+            GFX_FREE(pPass->outputNames[j]);
+        }
+    }
+    GFX_FREE(pGraph->pPasses);
+
+    for (uint32_t i = 0; i < pGraph->resourceCount; i++) {
+        GfxGraphResource* pResource = pGraph->ppResources[i];
+        if (pResource->image.image) {
+            gfxDestroyImage(&pResource->image);
+        }
+        GFX_FREE(pResource->pName);
+        GFX_FREE(pResource);
+    }
+    GFX_FREE(pGraph->ppResources);
+    GFX_FREE(pGraph->pOrder);
+
+    GFX_RESET(pGraph);
+}
+
+static uint32_t findGraphResource(const GfxRenderGraph* pGraph, const char* pName)
+{
+    for (uint32_t i = 0; i < pGraph->resourceCount; i++) {
+        if (!strcmp(pGraph->ppResources[i]->pName, pName)) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static GfxGraphResource* addGraphResource(GfxRenderGraph* pGraph, const char* pName)
+{
+    if (findGraphResource(pGraph, pName) != UINT32_MAX) {
+        GFX_ERROR("The render graph already has a resource named '%s'", pName);
+        return NULL;
+    }
+
+    pGraph->ppResources = GFX_REALLOC(pGraph->ppResources, (pGraph->resourceCount + 1) * sizeof *pGraph->ppResources);
+    if (!pGraph->ppResources) {
+        GFX_ERROR("Unable to allocate memory");
+    }
+
+    GfxGraphResource* pResource = allocZeroed(1, sizeof *pResource);
+    pResource->pName = copyString(pName, SIZE_MAX);
+    pGraph->ppResources[pGraph->resourceCount++] = pResource;
+    pGraph->compiled = false;
+    return pResource;
+}
+
+// Create, or recreate, the image of a resource at its size or the swapchain's
+static void createGraphImage(GfxGraphResource* pResource)
+{
+    if (pResource->image.image) {
+        gfxDestroyImage(&pResource->image);
+    }
+
+    VkExtent3D extent = {
+        .width = pResource->desc.width ? pResource->desc.width : gfxSwapchain.extent.width,
+        .height = pResource->desc.height ? pResource->desc.height : gfxSwapchain.extent.height,
+        .depth = 1,
+    };
+
+    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, pResource->desc.format, VK_IMAGE_TILING_OPTIMAL,
+                   pResource->desc.usage, 0, VK_IMAGE_TYPE_2D, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pResource->image);
+    gfxCreateImageView(&pResource->image,
+                       isDepthFormat(pResource->desc.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+                       VK_IMAGE_VIEW_TYPE_2D);
+
+    pResource->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    pResource->written = false;
+}
+
+GfxImage* gfxAddGraphImage(GfxRenderGraph* pGraph, const GfxGraphImageDesc* pDesc)
+{
+    if ((!pDesc->width || !pDesc->height) && !gfxSwapchain.swapchain) {
+        GFX_ERROR("Image '%s' follows the swapchain size, so the swapchain has to be created first", pDesc->pName);
+        return NULL;
+    }
+
+    GfxGraphResource* pResource = addGraphResource(pGraph, pDesc->pName);
+    if (!pResource) {
+        return NULL;
+    }
+
+    pResource->desc = *pDesc;
+    pResource->desc.pName = pResource->pName;
+    createGraphImage(pResource);
+
+    return &pResource->image;
+}
+
+void gfxAddGraphBuffer(GfxRenderGraph* pGraph, const char* pName, const GfxBuffer* pBuffer)
+{
+    GfxGraphResource* pResource = addGraphResource(pGraph, pName);
+    if (pResource) {
+        pResource->pBuffer = pBuffer;
+    }
+}
+
+void gfxAddGraphPass(GfxRenderGraph* pGraph, const GfxPassDesc* pDesc)
+{
+    pGraph->pPasses = GFX_REALLOC(pGraph->pPasses, (pGraph->passCount + 1) * sizeof *pGraph->pPasses);
+    if (!pGraph->pPasses) {
+        GFX_ERROR("Unable to allocate memory");
+    }
+
+    GfxGraphPass* pPass = &pGraph->pPasses[pGraph->passCount++];
+    *pPass = (GfxGraphPass){
+        .pName = copyString(pDesc->pName ? pDesc->pName : "(unnamed)", SIZE_MAX),
+        .type = pDesc->type,
+        .function = pDesc->function,
+        .pUserData = pDesc->pUserData,
+    };
+
+    // The lists end at the first name that is not set
+    while (pPass->inputCount < GFX_MAX_PASS_RESOURCES && pDesc->inputs[pPass->inputCount]) {
+        pPass->inputNames[pPass->inputCount] = copyString(pDesc->inputs[pPass->inputCount], SIZE_MAX);
+        pPass->inputCount++;
+    }
+    while (pPass->outputCount < GFX_MAX_PASS_RESOURCES && pDesc->outputs[pPass->outputCount]) {
+        pPass->outputNames[pPass->outputCount] = copyString(pDesc->outputs[pPass->outputCount], SIZE_MAX);
+        pPass->outputCount++;
+    }
+
+    pGraph->compiled = false;
+}
+
+void gfxSetGraphOutput(GfxRenderGraph* pGraph, const char* pName)
+{
+    uint32_t index = findGraphResource(pGraph, pName);
+    if (index == UINT32_MAX || pGraph->ppResources[index]->pBuffer) {
+        GFX_ERROR("The render graph has no image named '%s'", pName);
+        return;
+    }
+    pGraph->output = index;
+}
+
+GfxImage* gfxGetGraphImage(const GfxRenderGraph* pGraph, const char* pName)
+{
+    uint32_t index = findGraphResource(pGraph, pName);
+    if (index == UINT32_MAX || pGraph->ppResources[index]->pBuffer) {
+        return NULL;
+    }
+    return &pGraph->ppResources[index]->image;
+}
+
+static bool isAttachmentImage(const GfxGraphResource* pResource)
+{
+    return !pResource->pBuffer && (pResource->desc.usage &
+                                   (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT));
+}
+
+// Gather the attachments of the graphics passes from the images they write.
+// The attachment set refers to copies of the images, so it is rebuilt when the
+// images are recreated.
+static bool buildGraphPassAttachments(GfxRenderGraph* pGraph)
+{
+    for (uint32_t i = 0; i < pGraph->passCount; i++) {
+        GfxGraphPass* pPass = &pGraph->pPasses[i];
+        destroyGraphPassAttachments(pPass);
+
+        if (pPass->type != GFX_PASS_GRAPHICS) {
+            continue;
+        }
+
+        pPass->pColorImages = allocZeroed(GFX_MAX_PASS_RESOURCES, sizeof *pPass->pColorImages);
+        pPass->hasDepth = false;
+        uint32_t colorCount = 0;
+
+        for (uint32_t j = 0; j < pPass->outputCount; j++) {
+            const GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
+            if (!isAttachmentImage(pResource)) {
+                continue;
+            }
+
+            if (isDepthFormat(pResource->desc.format)) {
+                if (pPass->hasDepth) {
+                    GFX_ERROR("Pass '%s' writes more than one depth image", pPass->pName);
+                    return false;
+                }
+                pPass->depthImage = pResource->image;
+                pPass->hasDepth = true;
+            } else {
+                pPass->pColorImages[colorCount++] = pResource->image;
+            }
+        }
+
+        if (!colorCount) {
+            GFX_ERROR("Graphics pass '%s' writes no color attachment", pPass->pName);
+            return false;
+        }
+
+        gfxCreateAttachment(colorCount, pPass->pColorImages, pPass->hasDepth ? &pPass->depthImage : NULL, NULL,
+                            &pPass->attachment);
+    }
+
+    return true;
+}
+
+// Order the passes after the passes that write what they read, with a depth
+// first search. Returns false on a cycle.
+static bool visitGraphPass(GfxRenderGraph* pGraph, const uint32_t* pWriters, uint8_t* pState, uint32_t pass,
+                           uint32_t* pOrderCount)
+{
+    // 0 is unvisited, 1 is on the current path and 2 is done
+    if (pState[pass] == 2) {
+        return true;
+    }
+    if (pState[pass] == 1) {
+        GFX_ERROR("The render graph has a cycle through pass '%s'", pGraph->pPasses[pass].pName);
+        return false;
+    }
+
+    pState[pass] = 1;
+    const GfxGraphPass* pPass = &pGraph->pPasses[pass];
+    for (uint32_t i = 0; i < pPass->inputCount; i++) {
+        uint32_t writer = pWriters[pPass->inputs[i]];
+        if (writer != UINT32_MAX && writer != pass && !visitGraphPass(pGraph, pWriters, pState, writer, pOrderCount)) {
+            return false;
+        }
+    }
+    pState[pass] = 2;
+
+    pGraph->pOrder[(*pOrderCount)++] = pass;
+    return true;
+}
+
+static bool compileRenderGraph(GfxRenderGraph* pGraph)
+{
+    bool ok = true;
+
+    // Resolve the names, and find the one pass writing each resource
+    uint32_t* pWriters = GFX_MALLOC(GFX_MAX(pGraph->resourceCount, 1) * sizeof *pWriters);
+    for (uint32_t i = 0; i < pGraph->resourceCount; i++) {
+        pWriters[i] = UINT32_MAX;
+    }
+
+    for (uint32_t i = 0; i < pGraph->passCount && ok; i++) {
+        GfxGraphPass* pPass = &pGraph->pPasses[i];
+
+        for (uint32_t j = 0; j < pPass->inputCount && ok; j++) {
+            pPass->inputs[j] = findGraphResource(pGraph, pPass->inputNames[j]);
+            if (pPass->inputs[j] == UINT32_MAX) {
+                GFX_ERROR("Pass '%s' reads '%s', which is not in the render graph", pPass->pName, pPass->inputNames[j]);
+                ok = false;
+            }
+        }
+
+        for (uint32_t j = 0; j < pPass->outputCount && ok; j++) {
+            uint32_t resource = findGraphResource(pGraph, pPass->outputNames[j]);
+            pPass->outputs[j] = resource;
+            if (resource == UINT32_MAX) {
+                GFX_ERROR("Pass '%s' writes '%s', which is not in the render graph", pPass->pName,
+                          pPass->outputNames[j]);
+                ok = false;
+            } else if (pWriters[resource] != UINT32_MAX) {
+                GFX_ERROR("'%s' is written by both pass '%s' and pass '%s', but a render graph resource can only be "
+                          "written by one pass",
+                          pPass->outputNames[j], pGraph->pPasses[pWriters[resource]].pName, pPass->pName);
+                ok = false;
+            } else {
+                pWriters[resource] = i;
+            }
+        }
+    }
+
+    if (ok) {
+        for (uint32_t i = 0; i < pGraph->passCount; i++) {
+            const GfxGraphPass* pPass = &pGraph->pPasses[i];
+            for (uint32_t j = 0; j < pPass->inputCount; j++) {
+                if (pWriters[pPass->inputs[j]] == UINT32_MAX) {
+                    GFX_WARNING("Pass '%s' reads '%s', which no pass writes", pPass->pName, pPass->inputNames[j]);
+                }
+            }
+        }
+
+        GFX_FREE(pGraph->pOrder);
+        pGraph->pOrder = GFX_MALLOC(GFX_MAX(pGraph->passCount, 1) * sizeof *pGraph->pOrder);
+        uint8_t* pState = allocZeroed(GFX_MAX(pGraph->passCount, 1), sizeof *pState);
+        uint32_t orderCount = 0;
+        for (uint32_t i = 0; i < pGraph->passCount && ok; i++) {
+            ok = visitGraphPass(pGraph, pWriters, pState, i, &orderCount);
+        }
+        GFX_FREE(pState);
+    }
+
+    GFX_FREE(pWriters);
+
+    if (ok) {
+        ok = buildGraphPassAttachments(pGraph);
+    }
+
+    if (ok) {
+        GFX_DEBUG("Render graph execution order:");
+        for (uint32_t i = 0; i < pGraph->passCount; i++) {
+            GFX_DEBUG(" %" PRIu32 ". %s", i + 1, pGraph->pPasses[pGraph->pOrder[i]].pName);
+        }
+    }
+
+    pGraph->compiled = ok;
+    return ok;
+}
+
+// Recreate the images that follow the swapchain size if it has changed
+static void resizeGraphImages(GfxRenderGraph* pGraph)
+{
+    bool resized = false;
+
+    for (uint32_t i = 0; i < pGraph->resourceCount; i++) {
+        GfxGraphResource* pResource = pGraph->ppResources[i];
+        if (pResource->pBuffer || (pResource->desc.width && pResource->desc.height)) {
+            continue;
+        }
+
+        if (pResource->image.width != gfxSwapchain.extent.width ||
+            pResource->image.height != gfxSwapchain.extent.height) {
+            createGraphImage(pResource);
+            resized = true;
+        }
+    }
+
+    if (resized) {
+        buildGraphPassAttachments(pGraph);
+    }
+}
+
+// How an image in a layout is accessed, which a barrier to or from it has to
+// synchronize with
+static void layoutAccess(VkImageLayout layout, VkPipelineStageFlags2* pStage, VkAccessFlags2* pAccess)
+{
+    switch (layout) {
+    case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+        *pStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        *pAccess = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL:
+    case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        *pStage = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        *pAccess = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        *pStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        *pAccess = VK_ACCESS_2_SHADER_READ_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_GENERAL:
+        *pStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        *pAccess = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+        break;
+    case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        *pStage = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        *pAccess = VK_ACCESS_2_TRANSFER_READ_BIT;
+        break;
+    default:
+        // Nothing to wait for, the contents are discarded
+        *pStage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        *pAccess = VK_ACCESS_2_NONE;
+        break;
+    }
+}
+
+// Make what was done to a resource before visible to how it is used next. A
+// barrier is recorded also when an image stays in its layout, since it is the
+// barrier that orders one pass after another.
+static void transitionGraphResource(VkCommandBuffer cmd, GfxGraphResource* pResource, VkImageLayout layout, bool write)
+{
+    if (pResource->pBuffer) {
+        gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         pResource->written ? VK_ACCESS_2_MEMORY_WRITE_BIT : VK_ACCESS_2_NONE,
+                         VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                         VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+        pResource->written = write;
+        return;
+    }
+
+    VkPipelineStageFlags2 srcStage, dstStage;
+    VkAccessFlags2 srcAccess, dstAccess;
+    layoutAccess(pResource->layout, &srcStage, &srcAccess);
+    layoutAccess(layout, &dstStage, &dstAccess);
+
+    VkFormat format = pResource->desc.format;
+    VkImageSubresourceRange range = {
+        .aspectMask = isDepthFormat(format)
+                          ? VK_IMAGE_ASPECT_DEPTH_BIT | (hasStencil(format) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0)
+                          : VK_IMAGE_ASPECT_COLOR_BIT,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+
+    gfxImageBarrier(cmd, srcStage, srcAccess, dstStage, dstAccess, pResource->layout, layout, pResource->image.image,
+                    &range);
+    pResource->layout = layout;
+    pResource->written = write;
+}
+
+// Layout a pass reads an image in
+static VkImageLayout graphReadLayout(const GfxGraphResource* pResource)
+{
+    if (pResource->desc.usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+    if (pResource->desc.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+        return VK_IMAGE_LAYOUT_GENERAL;
+    }
+    return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+}
+
+// Layout a pass writes an image in
+static VkImageLayout graphWriteLayout(const GfxGraphPass* pPass, const GfxGraphResource* pResource)
+{
+    if (pPass->type == GFX_PASS_GRAPHICS && isAttachmentImage(pResource)) {
+        return isDepthFormat(pResource->desc.format) ? depthAttachmentLayout(pResource->desc.format)
+                                                     : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    return VK_IMAGE_LAYOUT_GENERAL;
+}
+
+void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph)
+{
+    if (!pGraph->compiled && !compileRenderGraph(pGraph)) {
+        return;
+    }
+
+    resizeGraphImages(pGraph);
+
+    for (uint32_t i = 0; i < pGraph->passCount; i++) {
+        GfxGraphPass* pPass = &pGraph->pPasses[pGraph->pOrder[i]];
+
+        for (uint32_t j = 0; j < pPass->inputCount; j++) {
+            GfxGraphResource* pResource = pGraph->ppResources[pPass->inputs[j]];
+            transitionGraphResource(cmd, pResource, graphReadLayout(pResource), false);
+        }
+
+        for (uint32_t j = 0; j < pPass->outputCount; j++) {
+            GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
+            transitionGraphResource(cmd, pResource, graphWriteLayout(pPass, pResource), true);
+        }
+
+        if (pPass->type == GFX_PASS_GRAPHICS) {
+            // Every color attachment is cleared to the color of its image
+            uint32_t color = 0;
+            for (uint32_t j = 0; j < pPass->outputCount; j++) {
+                const GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
+                if (isAttachmentImage(pResource) && !isDepthFormat(pResource->desc.format)) {
+                    VkRenderingAttachmentInfo* pInfo = &pPass->attachment.pRenderingAttachmentInfos[color++];
+                    pInfo->clearValue.color = pResource->desc.clearColor;
+                    pInfo->loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                }
+            }
+
+            beginRendering(cmd, &pPass->attachment);
+            pPass->function(cmd, &pPass->attachment, pPass->pUserData);
+            vkCmdEndRendering(cmd);
+        } else {
+            pPass->function(cmd, NULL, pPass->pUserData);
+        }
+    }
+
+    // Hand the output over ready to be presented
+    if (pGraph->output != UINT32_MAX) {
+        transitionGraphResource(cmd, pGraph->ppResources[pGraph->output], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, false);
     }
 }
 

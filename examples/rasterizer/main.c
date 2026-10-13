@@ -27,14 +27,17 @@ typedef struct {
 
 static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 {
-    *pWidth = 0;
-    *pHeight = 0;
+    int width, height;
+    glfwGetFramebufferSize(pWindow, &width, &height);
 
-    // Handle minimization
-    do {
-        glfwGetFramebufferSize(pWindow, pWidth, pHeight);
+    // Wait while the window is minimized
+    while (width == 0 || height == 0) {
         glfwWaitEvents();
-    } while (*pWidth == 0 || *pHeight == 0);
+        glfwGetFramebufferSize(pWindow, &width, &height);
+    }
+
+    *pWidth = (uint32_t)width;
+    *pHeight = (uint32_t)height;
 }
 
 static void createWindow()
@@ -92,38 +95,6 @@ static void createDevice(VkSurfaceKHR surface)
     gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
 }
 
-static void createAttachments(GfxImage* pColorAttachment, GfxImage* pDepthAttachment)
-{
-    VkExtent3D extent = {.width = gfxSwapchain.extent.width, .height = gfxSwapchain.extent.height, .depth = 1};
-
-    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, VK_IMAGE_TYPE_2D,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
-    gfxCreateImageView(pColorAttachment, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D);
-
-    VkFormat depthFormat = gfxFindDepthFormat();
-    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, depthFormat, VK_IMAGE_TILING_OPTIMAL,
-                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, 0, VK_IMAGE_TYPE_2D,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pDepthAttachment);
-    gfxCreateImageView(pDepthAttachment, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_VIEW_TYPE_2D);
-
-    // Transition depth attachment for depth use
-    VkImageSubresourceRange depthSubresourceRange = {.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                                                     .baseMipLevel = 0,
-                                                     .levelCount = 1,
-                                                     .baseArrayLayer = 0,
-                                                     .layerCount = 1};
-    if (depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT || depthFormat == VK_FORMAT_D24_UNORM_S8_UINT) {
-        depthSubresourceRange.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-    }
-    VkCommandBuffer cmd = gfxCmdBegin();
-    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, pDepthAttachment->image,
-                    &depthSubresourceRange);
-    gfxCmdEnd(cmd);
-}
-
 static void createVertexAndIndexBuffers(GfxBuffer* pVertexBuffer, GfxBuffer* pIndexBuffer)
 {
     Vertex vertices[] = {
@@ -146,8 +117,29 @@ static void createVertexAndIndexBuffers(GfxBuffer* pVertexBuffer, GfxBuffer* pIn
     gfxCopyBufferFromHost(pIndexBuffer, indices, sizeof(indices), 0);
 }
 
-static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
+static void updateCamera(const GfxBuffer* pCameraBuffer)
 {
+    CameraMatrices cameraMatrices = {
+        .view = mat4_lookat((vec3){0.0f, 0.0f, 5.0f}, (vec3){0.0f, 0.0f, 0.0f}, (vec3){0.0f, 1.0f, 0.0f}),
+        .proj = mat4_perspective(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 0.01f, 100.0f,
+                                 30.0f * 3.14159265f / 180.0f),
+    };
+
+    gfxCopyBufferFromHost(pCameraBuffer, &cameraMatrices, sizeof(CameraMatrices), 0);
+}
+
+// What the draw pass needs to record its commands
+typedef struct {
+    GfxShader* pShader;
+    const GfxBuffer* pVertexBuffer;
+    const GfxBuffer* pIndexBuffer;
+} DrawPass;
+
+// Called by the render graph while it renders to the color and depth images
+static void drawPass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, void* pUserData)
+{
+    const DrawPass* pDraw = pUserData;
+
     const VkVertexInputBindingDescription2EXT vertexBindingDescription[] = {{
         .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
         .binding = 0,
@@ -173,8 +165,20 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAtt
         },
     };
 
-    gfxCmdSetDefaultStates(cmd, pAttachmentSet, GFX_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
+    // Set rendering states. Depth writes are on by default.
+    gfxCmdSetDefaultStates(cmd, pAttachment, GFX_ARRAY_LEN(vertexBindingDescription), vertexBindingDescription,
                            GFX_ARRAY_LEN(vertexAttributeDescription), vertexAttributeDescription);
+
+    // Bind shader and the resources attached to it
+    gfxCmdBindShader(cmd, pDraw->pShader);
+    gfxCmdBindResources(cmd, pDraw->pShader);
+
+    // Bind vertex and index buffers
+    VkDeviceSize vertexBufferOffset = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &pDraw->pVertexBuffer->buffer, &vertexBufferOffset);
+    vkCmdBindIndexBuffer(cmd, pDraw->pIndexBuffer->buffer, 0, VK_INDEX_TYPE_UINT32);
+
+    vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
 }
 
 int main()
@@ -190,12 +194,21 @@ int main()
 
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
-    GfxImage colorAttachment;
-    GfxImage depthAttachment;
-    createAttachments(&colorAttachment, &depthAttachment);
-
-    GfxAttachment attachment;
-    gfxCreateAttachment(1, &colorAttachment, &depthAttachment, NULL, &attachment);
+    // The render graph owns the images the frame is rendered to, and recreates
+    // them when the window is resized
+    GfxRenderGraph graph;
+    gfxCreateRenderGraph(&graph);
+    gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
+                                 .pName = "color",
+                                 .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 .clearColor = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}},
+                             });
+    gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
+                                 .pName = "depth",
+                                 .format = gfxFindDepthFormat(),
+                                 .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                             });
 
     GfxShaderStageDesc shaderStages[] = {
         {.pPath = "shader.vert"},
@@ -207,14 +220,7 @@ int main()
     GfxBuffer cameraBuffer;
     gfxCreateBuffer(sizeof(CameraMatrices), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &cameraBuffer);
-
-    CameraMatrices cameraMatrices = {
-        .view = mat4_lookat((vec3){0.0f, 0.0f, 5.0f}, (vec3){0.0f, 0.0f, 0.0f}, (vec3){0.0f, 1.0f, 0.0f}),
-        .proj = mat4_perspective(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 0.01f, 100.0f,
-                                 30.0f * 3.14159265f / 180.0f),
-    };
-
-    gfxCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices), 0);
+    updateCamera(&cameraBuffer);
 
     // The model matrix changes every frame, so every frame in flight gets its own copy
     GfxBuffer modelBuffer;
@@ -232,6 +238,21 @@ int main()
     gfxSetShaderBuffer(&shader, "camera", &cameraBuffer);
     gfxSetShaderBuffer(&shader, "mesh", &modelBuffer);
     gfxSetShaderTexture(&shader, "diffuseTexture", &texture);
+
+    // A single pass draws the quad to the color and depth images, and the
+    // color image is what gets presented
+    DrawPass draw = {
+        .pShader = &shader,
+        .pVertexBuffer = &vertexBuffer,
+        .pIndexBuffer = &indexBuffer,
+    };
+    gfxAddGraphPass(&graph, &(GfxPassDesc){
+                                .pName = "Draw",
+                                .outputs = {"color", "depth"},
+                                .function = drawPass,
+                                .pUserData = &draw,
+                            });
+    gfxSetGraphOutput(&graph, "color");
 
     bool reloadKeyDown = false;
     bool screenshotKeyDown = false;
@@ -257,12 +278,9 @@ int main()
         mat4* model = gfxGetPerFrameData(&modelBuffer);
         *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
-        // Check if swapchain has been recreated
+        // If the swapchain changed, the projection matrix should be updated.
         if (gfxSwapchain.recreated) {
-            gfxDestroyImage(&colorAttachment);
-            gfxDestroyImage(&depthAttachment);
-            createAttachments(&colorAttachment, &depthAttachment);
-            gfxRecreateAttachment(&attachment, 1, &colorAttachment, &depthAttachment, NULL);
+            updateCamera(&cameraBuffer);
         }
 
         // Start new frame. No command buffer means the swapchain was out of
@@ -273,35 +291,13 @@ int main()
             continue;
         }
 
-        gfxTransitionForColorAttachment(cmd, &colorAttachment);
-
-        VkClearValue clearValue = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}};
-        gfxCmdBeginRendering(cmd, &attachment, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
-
-        // Set rendering states. Depth writes are on by default.
-        cmdSetRenderingStates(cmd, &attachment);
-
-        // Bind shader and the resources attached to it
-        gfxCmdBindShader(cmd, &shader);
-        gfxCmdBindResources(cmd, &shader);
-
-        // Bind vertex and index buffers
-        VkDeviceSize vertexBufferOffset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &vertexBuffer.buffer, &vertexBufferOffset);
-        vkCmdBindIndexBuffer(cmd, indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-
-        // Draw
-        vkCmdDrawIndexed(cmd, 6, 1, 0, 0, 0);
-
-        // End and present frame
-        gfxCmdEndRendering(cmd, &attachment);
-        gfxTransitionForBlitting(cmd, &colorAttachment);
-        gfxPresent(cmd, &colorAttachment);
+        gfxCmdExecuteRenderGraph(cmd, &graph);
+        gfxPresent(cmd, gfxGetGraphImage(&graph, "color"));
 
         // Save the presented frame when F12 is pressed
         bool screenshotKey = glfwGetKey(pWindow, GLFW_KEY_F12) == GLFW_PRESS;
         if (screenshotKey && !screenshotKeyDown) {
-            gfxSaveImagePNG(&colorAttachment, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
+            gfxSaveImagePNG(gfxGetGraphImage(&graph, "color"), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
         }
         screenshotKeyDown = screenshotKey;
 
@@ -318,10 +314,7 @@ int main()
 
     gfxDestroyShader(&shader);
 
-    gfxDestroyImage(&colorAttachment);
-    gfxDestroyImage(&depthAttachment);
-
-    gfxDestroyAttachment(&attachment);
+    gfxDestroyRenderGraph(&graph);
 
     gfxDestroySwapchain();
     gfxDestroyDevice();

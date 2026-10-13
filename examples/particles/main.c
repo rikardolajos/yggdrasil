@@ -42,14 +42,17 @@ typedef struct {
 
 static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 {
-    *pWidth = 0;
-    *pHeight = 0;
+    int width, height;
+    glfwGetFramebufferSize(pWindow, &width, &height);
 
-    // Handle minimization
-    do {
-        glfwGetFramebufferSize(pWindow, (int*)pWidth, (int*)pHeight);
+    // Wait while the window is minimized
+    while (width == 0 || height == 0) {
         glfwWaitEvents();
-    } while (*pWidth == 0 || *pHeight == 0);
+        glfwGetFramebufferSize(pWindow, &width, &height);
+    }
+
+    *pWidth = (uint32_t)width;
+    *pHeight = (uint32_t)height;
 }
 
 static void createWindow()
@@ -105,16 +108,6 @@ static void createDevice(VkSurfaceKHR surface)
                                           }};
 
     gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
-}
-
-static void createColorAttachment(GfxImage* pColorAttachment)
-{
-    VkExtent3D extent = {.width = gfxSwapchain.extent.width, .height = gfxSwapchain.extent.height, .depth = 1};
-
-    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, VK_IMAGE_TYPE_2D,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pColorAttachment);
-    gfxCreateImageView(pColorAttachment, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D);
 }
 
 static float randomFloat()
@@ -173,6 +166,47 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAtt
     gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &additive);
 }
 
+// What the simulation pass needs to record its commands
+typedef struct {
+    GfxShader* pShader;
+    SimulationParameters parameters;
+} SimulatePass;
+
+// What the draw pass needs to record its commands
+typedef struct {
+    GfxShader* pShader;
+    RenderParameters parameters;
+} DrawPass;
+
+// Advance the simulation. Called by the render graph after the previous
+// frame's draw is done with the particles.
+static void simulatePass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, void* pUserData)
+{
+    SimulatePass* pSimulate = pUserData;
+
+    gfxCmdBindShader(cmd, pSimulate->pShader);
+    gfxCmdBindResources(cmd, pSimulate->pShader);
+    gfxCmdPushConstants(cmd, pSimulate->pShader, 0, sizeof pSimulate->parameters, &pSimulate->parameters);
+    gfxCmdDispatch(cmd, pSimulate->pShader, PARTICLE_COUNT, 1, 1);
+}
+
+// Draw the particles. Called by the render graph while it renders to the color
+// image, after the simulation's writes have been made visible.
+static void drawPass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, void* pUserData)
+{
+    DrawPass* pDraw = pUserData;
+
+    cmdSetRenderingStates(cmd, pAttachment);
+
+    gfxCmdBindShader(cmd, pDraw->pShader);
+    gfxCmdBindResources(cmd, pDraw->pShader);
+    gfxCmdPushConstants(cmd, pDraw->pShader, 0, sizeof pDraw->parameters, &pDraw->parameters);
+
+    // Draw one point per particle, the vertex shader looks each one up by its
+    // vertex index
+    vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0);
+}
+
 // Edge triggered key press
 static bool keyPressed(int key, bool* pWasDown)
 {
@@ -195,11 +229,16 @@ int main()
 
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
-    GfxImage colorAttachment;
-    createColorAttachment(&colorAttachment);
-
-    GfxAttachment attachment;
-    gfxCreateAttachment(1, &colorAttachment, NULL, NULL, &attachment);
+    // The render graph owns the image the particles are drawn to, and
+    // recreates it when the window is resized
+    GfxRenderGraph graph;
+    gfxCreateRenderGraph(&graph);
+    gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
+                                 .pName = "color",
+                                 .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                 .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 .clearColor = {.float32 = {0.01f, 0.01f, 0.03f, 1.0f}},
+                             });
 
     // One shader advances the simulation, the other draws it
     GfxShaderStageDesc simulationStage = {.pPath = "particles.comp"};
@@ -231,15 +270,33 @@ int main()
     gfxSetShaderBuffer(&render, "Particles", &particleBuffer);
     gfxSetShaderBuffer(&render, "camera", &cameraBuffer);
 
-    SimulationParameters simulationParameters = {
-        .strength = 20.0f,
-        .damping = 0.15f,
-        .particleCount = PARTICLE_COUNT,
+    SimulatePass simulate = {
+        .pShader = &simulation,
+        .parameters = {.strength = 20.0f, .damping = 0.15f, .particleCount = PARTICLE_COUNT},
     };
-    RenderParameters renderParameters = {
-        .pointSize = 2.0f,
-        .speedScale = 0.2f,
+    DrawPass draw = {
+        .pShader = &render,
+        .parameters = {.pointSize = 2.0f, .speedScale = 0.2f},
     };
+
+    // The particle buffer is in the graph too, so that the simulation runs
+    // before the draw that reads it, and after the previous frame's draw
+    gfxAddGraphBuffer(&graph, "particles", &particleBuffer);
+    gfxAddGraphPass(&graph, &(GfxPassDesc){
+                                .pName = "Simulate",
+                                .type = GFX_PASS_COMPUTE,
+                                .outputs = {"particles"},
+                                .function = simulatePass,
+                                .pUserData = &simulate,
+                            });
+    gfxAddGraphPass(&graph, &(GfxPassDesc){
+                                .pName = "Draw",
+                                .inputs = {"particles"},
+                                .outputs = {"color"},
+                                .function = drawPass,
+                                .pUserData = &draw,
+                            });
+    gfxSetGraphOutput(&graph, "color");
 
     GFX_INFO("Simulating %d particles in workgroups of %" PRIu32 ". Space pauses, R resets, F5 reloads shaders and "
              "F12 saves a screenshot.",
@@ -285,17 +342,10 @@ int main()
 
         // Move the attractor along a slow figure-of-eight, so that the cloud
         // keeps getting stirred
-        simulationParameters.attractor[0] = 4.0f * sinf(0.7f * time);
-        simulationParameters.attractor[1] = 2.0f * sinf(1.4f * time);
-        simulationParameters.attractor[2] = 4.0f * cosf(0.7f * time);
-        simulationParameters.delta = step;
-
-        // Check if swapchain has been recreated
-        if (gfxSwapchain.recreated) {
-            gfxDestroyImage(&colorAttachment);
-            createColorAttachment(&colorAttachment);
-            gfxRecreateAttachment(&attachment, 1, &colorAttachment, NULL, NULL);
-        }
+        simulate.parameters.attractor[0] = 4.0f * sinf(0.7f * time);
+        simulate.parameters.attractor[1] = 2.0f * sinf(1.4f * time);
+        simulate.parameters.attractor[2] = 4.0f * cosf(0.7f * time);
+        simulate.parameters.delta = step;
 
         // This frame's copy of the camera is no longer read by the device
         CameraMatrices* pCamera = gfxGetPerFrameData(&cameraBuffer);
@@ -312,46 +362,12 @@ int main()
             continue;
         }
 
-        // The previous frame may still be drawing the particles, so the
-        // simulation has to wait for it before overwriting them
-        gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                         VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
-
-        // Advance the simulation. Dispatches cannot be recorded while
-        // rendering, so this happens before rendering begins.
-        gfxCmdBindShader(cmd, &simulation);
-        gfxCmdBindResources(cmd, &simulation);
-        gfxCmdPushConstants(cmd, &simulation, 0, sizeof simulationParameters, &simulationParameters);
-        gfxCmdDispatch(cmd, &simulation, PARTICLE_COUNT, 1, 1);
-
-        // Let the vertex shader see what the compute shader just wrote
-        gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                         VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
-
-        gfxTransitionForColorAttachment(cmd, &colorAttachment);
-
-        VkClearValue clearValue = {.color = {{0.01f, 0.01f, 0.03f, 1.0f}}};
-        gfxCmdBeginRendering(cmd, &attachment, clearValue, VK_ATTACHMENT_LOAD_OP_CLEAR);
-
-        cmdSetRenderingStates(cmd, &attachment);
-
-        gfxCmdBindShader(cmd, &render);
-        gfxCmdBindResources(cmd, &render);
-        gfxCmdPushConstants(cmd, &render, 0, sizeof renderParameters, &renderParameters);
-
-        // Draw one point per particle, the vertex shader looks each one up by
-        // its vertex index
-        vkCmdDraw(cmd, PARTICLE_COUNT, 1, 0, 0);
-
-        // End and present frame
-        gfxCmdEndRendering(cmd, &attachment);
-        gfxTransitionForBlitting(cmd, &colorAttachment);
-        gfxPresent(cmd, &colorAttachment);
+        gfxCmdExecuteRenderGraph(cmd, &graph);
+        gfxPresent(cmd, gfxGetGraphImage(&graph, "color"));
 
         // Save the presented frame when F12 is pressed
         if (keyPressed(GLFW_KEY_F12, &screenshotKeyDown)) {
-            gfxSaveImagePNG(&colorAttachment, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
+            gfxSaveImagePNG(gfxGetGraphImage(&graph, "color"), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
         }
 
         glfwPollEvents();
@@ -363,8 +379,7 @@ int main()
     gfxDestroyShader(&simulation);
     gfxDestroyShader(&render);
 
-    gfxDestroyImage(&colorAttachment);
-    gfxDestroyAttachment(&attachment);
+    gfxDestroyRenderGraph(&graph);
 
     gfxDestroySwapchain();
     gfxDestroyDevice();

@@ -30,14 +30,17 @@ typedef struct {
 
 static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 {
-    *pWidth = 0;
-    *pHeight = 0;
+    int width, height;
+    glfwGetFramebufferSize(pWindow, &width, &height);
 
-    // Handle minimization
-    do {
-        glfwGetFramebufferSize(pWindow, pWidth, pHeight);
+    // Wait while the window is minimized
+    while (width == 0 || height == 0) {
         glfwWaitEvents();
-    } while (*pWidth == 0 || *pHeight == 0);
+        glfwGetFramebufferSize(pWindow, &width, &height);
+    }
+
+    *pWidth = (uint32_t)width;
+    *pHeight = (uint32_t)height;
 }
 
 static void createWindow()
@@ -105,16 +108,6 @@ static void createDevice(VkSurfaceKHR surface)
     gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
 }
 
-static void createOutputImage(GfxImage* pImage)
-{
-    VkExtent3D extent = {.width = gfxSwapchain.extent.width, .height = gfxSwapchain.extent.height, .depth = 1};
-
-    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TILING_OPTIMAL,
-                   VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, VK_IMAGE_TYPE_2D,
-                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pImage);
-    gfxCreateImageView(pImage, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_VIEW_TYPE_2D);
-}
-
 static void updateCamera(const GfxBuffer* pCameraBuffer)
 {
     vec3 position = {0.0f, 0.8f, 5.0f};
@@ -176,6 +169,34 @@ static VkAccelerationStructureInstanceKHR quadInstance(const GfxAccelerationStru
     return gfxAccelerationStructureInstance(pBLAS, transform.array, 1);
 }
 
+// What the trace pass needs to record its commands
+typedef struct {
+    GfxShader* pShader;
+    GfxRayTracingPipeline* pPipeline;
+    const GfxAccelerationStructure* pBLAS;
+    GfxAccelerationStructure* pTLAS;
+    VkAccelerationStructureInstanceKHR instances[2];
+    const GfxImage* pOutput;
+    float angle;
+    float lightDirection[4];
+} TracePass;
+
+// Called by the render graph, after it has made the output image writable
+static void tracePass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, void* pUserData)
+{
+    TracePass* pTrace = pUserData;
+
+    // Spin the quad. The instances are recorded into the command buffer, so
+    // frames in flight are not disturbed.
+    pTrace->instances[1] = quadInstance(pTrace->pBLAS, pTrace->angle);
+    gfxCmdUpdateTLAS(cmd, pTrace->pTLAS, GFX_ARRAY_LEN(pTrace->instances), pTrace->instances);
+
+    gfxCmdBindRayTracingPipeline(cmd, pTrace->pPipeline);
+    gfxCmdBindResources(cmd, pTrace->pShader);
+    gfxCmdPushConstants(cmd, pTrace->pShader, 0, sizeof(pTrace->lightDirection), pTrace->lightDirection);
+    gfxCmdTraceRays(cmd, pTrace->pPipeline, pTrace->pOutput->width, pTrace->pOutput->height, 1);
+}
+
 int main()
 {
     createWindow();
@@ -189,8 +210,17 @@ int main()
 
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
-    GfxImage outputImage;
-    createOutputImage(&outputImage);
+    // The ray tracing pipeline writes to a storage image owned by the render
+    // graph, which is then presented. The graph recreates it when the window
+    // is resized.
+    GfxRenderGraph graph;
+    gfxCreateRenderGraph(&graph);
+    GfxImage* pOutputImage =
+        gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
+                                     .pName = "color",
+                                     .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                     .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 });
 
     GfxShaderStageDesc shaderStages[] = {
         {.pPath = "raygen.rgen"},      {.pPath = "miss.rmiss"},   {.pPath = "shadow.rmiss"},
@@ -230,10 +260,17 @@ int main()
 
     // Both instances use the same geometry. The quad is moved every frame, so
     // the TLAS allows updates.
-    float angle = 0.0f;
-    VkAccelerationStructureInstanceKHR instances[] = {floorInstance(&blas), quadInstance(&blas, angle)};
     GfxAccelerationStructure tlas;
-    gfxCreateTLAS(GFX_ARRAY_LEN(instances), instances,
+    TracePass trace = {
+        .pShader = &shader,
+        .pPipeline = &pipeline,
+        .pBLAS = &blas,
+        .pTLAS = &tlas,
+        .instances = {floorInstance(&blas), quadInstance(&blas, 0.0f)},
+        .pOutput = pOutputImage,
+        .lightDirection = {0.6f, 1.0f, 0.4f, 0.0f},
+    };
+    gfxCreateTLAS(GFX_ARRAY_LEN(trace.instances), trace.instances,
                   VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
                       VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR,
                   &tlas);
@@ -243,10 +280,18 @@ int main()
     gfxSetShaderBuffer(&shader, "vertices", &vertexBuffer);
     gfxSetShaderBuffer(&shader, "indices", &indexBuffer);
     gfxSetShaderTexture(&shader, "diffuseTexture", &texture);
-    gfxSetShaderImage(&shader, "outputImage", &outputImage, VK_IMAGE_LAYOUT_GENERAL);
+    gfxSetShaderImage(&shader, "outputImage", pOutputImage, VK_IMAGE_LAYOUT_GENERAL);
     gfxSetShaderBuffer(&shader, "camera", &cameraBuffer);
 
-    float lightDirection[4] = {0.6f, 1.0f, 0.4f, 0.0f};
+    // Tracing rays is a compute pass, which writes the color image as storage
+    gfxAddGraphPass(&graph, &(GfxPassDesc){
+                                .pName = "Trace",
+                                .type = GFX_PASS_COMPUTE,
+                                .outputs = {"color"},
+                                .function = tracePass,
+                                .pUserData = &trace,
+                            });
+    gfxSetGraphOutput(&graph, "color");
 
     bool reloadKeyDown = false;
     bool screenshotKeyDown = false;
@@ -265,10 +310,10 @@ int main()
         }
         reloadKeyDown = reloadKey;
 
-        // Check if swapchain has been recreated
+        // The device is idle after the swapchain has been recreated, so the
+        // camera can be written directly. The render graph resizes its images
+        // on its own.
         if (gfxSwapchain.recreated) {
-            gfxDestroyImage(&outputImage);
-            createOutputImage(&outputImage);
             updateCamera(&cameraBuffer);
         }
 
@@ -280,30 +325,15 @@ int main()
             continue;
         }
 
-        // Spin the quad
-        angle += delta;
-        instances[1] = quadInstance(&blas, angle);
-        gfxCmdUpdateTLAS(cmd, &tlas, GFX_ARRAY_LEN(instances), instances);
+        trace.angle += delta;
 
-        gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-                        VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_2_SHADER_WRITE_BIT,
-                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, outputImage.image, NULL);
-
-        gfxCmdBindRayTracingPipeline(cmd, &pipeline);
-        gfxCmdBindResources(cmd, &shader);
-        gfxCmdPushConstants(cmd, &shader, 0, sizeof(lightDirection), lightDirection);
-        gfxCmdTraceRays(cmd, &pipeline, outputImage.width, outputImage.height, 1);
-
-        gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_2_SHADER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, outputImage.image, NULL);
-
-        gfxPresent(cmd, &outputImage);
+        gfxCmdExecuteRenderGraph(cmd, &graph);
+        gfxPresent(cmd, pOutputImage);
 
         // Save the presented frame when F12 is pressed
         bool screenshotKey = glfwGetKey(pWindow, GLFW_KEY_F12) == GLFW_PRESS;
         if (screenshotKey && !screenshotKeyDown) {
-            gfxSaveImagePNG(&outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
+            gfxSaveImagePNG(pOutputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
         }
         screenshotKeyDown = screenshotKey;
 
@@ -323,7 +353,7 @@ int main()
     gfxDestroyRayTracingPipeline(&pipeline);
     gfxDestroyShader(&shader);
 
-    gfxDestroyImage(&outputImage);
+    gfxDestroyRenderGraph(&graph);
 
     gfxDestroySwapchain();
     gfxDestroyDevice();
