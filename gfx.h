@@ -53,6 +53,17 @@ extern "C" {
 #include "stb_image.h"
 #endif
 
+// Depth goes from 0 at the near plane to 1 at the far plane, so depth is
+// cleared to 1.0 and the smaller depth wins. Define GFX_REVERSE_Z before
+// including gfx.h to reverse this.
+#ifdef GFX_REVERSE_Z
+#define GFX_DEPTH_CLEAR 0.0f
+#define GFX_DEPTH_COMPARE_OP VK_COMPARE_OP_GREATER
+#else
+#define GFX_DEPTH_CLEAR 1.0f
+#define GFX_DEPTH_COMPARE_OP VK_COMPARE_OP_LESS
+#endif
+
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -819,7 +830,8 @@ void gfxRecreateAttachment(GfxAttachment* pAttachmentSet, uint32_t colorAttachme
                            GfxImage* pDepthAttachment, GfxImage* pResolveAttachment);
 
 /// <summary>
-/// Begin dynamic rendering using an attachment set.
+/// Begin dynamic rendering using an attachment set. A depth attachment is
+/// cleared to GFX_DEPTH_CLEAR.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachmentSet">Attachment set to use</param>
@@ -1043,8 +1055,8 @@ void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline
 /// <summary>
 /// Set default states for rendering using shader objects. Viewport, scissor and
 /// sample count are taken from the attachment set's first color attachment.
-/// Depth testing is enabled with a reverse Z convention: the depth attachment is
-/// cleared to 0.0 and VK_COMPARE_OP_GREATER wins.
+/// Depth testing is enabled with GFX_DEPTH_COMPARE_OP, which follows the depth
+/// convention chosen with GFX_REVERSE_Z.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachmentSet">Attachment set being rendered to</param>
@@ -2814,7 +2826,7 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentS
             .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue.depthStencil = {.depth = 0.0f, .stencil = 0},
+            .clearValue.depthStencil = {.depth = GFX_DEPTH_CLEAR, .stencil = 0},
         };
     }
 
@@ -5375,10 +5387,9 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
     vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
-    // Reverse Z: the depth attachment is cleared to 0.0 and greater wins
     vkCmdSetDepthTestEnable(cmd, VK_TRUE);
     vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
-    vkCmdSetDepthCompareOp(cmd, VK_COMPARE_OP_GREATER);
+    vkCmdSetDepthCompareOp(cmd, GFX_DEPTH_COMPARE_OP);
     vkCmdSetDepthBoundsTestEnable(cmd, VK_FALSE);
     vkCmdSetDepthBiasEnable(cmd, VK_FALSE);
     vkCmdSetStencilTestEnable(cmd, VK_FALSE);
