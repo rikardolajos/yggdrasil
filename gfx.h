@@ -204,6 +204,7 @@ typedef struct GfxDeviceProperties {
     VkPhysicalDeviceProperties physicalDevice;
     VkPhysicalDeviceMemoryProperties memory;
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR rayTracingPipeline;
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructure;
 } GfxDeviceProperties;
 
 // Device level function pointers for extensions that the Vulkan loader does not
@@ -222,6 +223,14 @@ typedef struct GfxDeviceFunctions {
     PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;
     PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;
+    PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
+    PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
+    PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
+    PFN_vkGetAccelerationStructureDeviceAddressKHR vkGetAccelerationStructureDeviceAddressKHR;
+    PFN_vkCmdBuildAccelerationStructuresKHR vkCmdBuildAccelerationStructuresKHR;
+    PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR;
+    PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR;
+    PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR;
 } GfxDeviceFunctions;
 
 // Device contains a Vulkan context for rendering. The GFX device is
@@ -242,6 +251,8 @@ typedef struct GfxDevice {
     uint32_t queueFamilyIndex;
     uint32_t apiVersion;
     VkShaderStageFlags graphicsShaderStages;
+    bool accelerationStructures; // VK_KHR_acceleration_structure is enabled
+    bool rayTracingPipelines;    // VK_KHR_ray_tracing_pipeline is enabled
     uint64_t frame;
     uint64_t completedFrames;
     uint64_t resourceGeneration;
@@ -369,6 +380,44 @@ typedef struct GfxAttachment {
     GfxImage* pResolveAttachment;
 } GfxAttachment;
 
+// Triangle geometry for a bottom level acceleration structure. Vertex and
+// index buffers need VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT and
+// VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR.
+// Vertices are VK_FORMAT_R32G32B32_SFLOAT unless another format is given, and
+// indices are 32 bit. Without an index buffer every three vertices form a
+// triangle. Set flags to VK_GEOMETRY_OPAQUE_BIT_KHR for geometry that should
+// not invoke any-hit shaders.
+typedef struct GfxGeometryDesc {
+    const GfxBuffer* pVertexBuffer;
+    VkDeviceSize vertexOffset;
+    VkDeviceSize vertexStride;
+    uint32_t vertexCount;
+    VkFormat vertexFormat;
+    const GfxBuffer* pIndexBuffer;
+    VkDeviceSize indexOffset;
+    uint32_t indexCount;
+    VkGeometryFlagsKHR flags;
+} GfxGeometryDesc;
+
+// Acceleration structure for ray tracing. A bottom level acceleration
+// structure (BLAS) holds geometry and is created with gfxCreateBLAS(). A top
+// level acceleration structure (TLAS) holds instances of BLASes and is created
+// with gfxCreateTLAS(). Instances can be changed every frame with
+// gfxCmdUpdateTLAS(), up to the number the TLAS was created with. Attach a
+// TLAS to a shader with gfxSetShaderAccelerationStructure(). Release resources
+// with gfxDestroyAccelerationStructure().
+typedef struct GfxAccelerationStructure {
+    VkAccelerationStructureKHR accelerationStructure;
+    VkAccelerationStructureTypeKHR type;
+    VkBuildAccelerationStructureFlagsKHR flags;
+    VkDeviceAddress address;
+    GfxBuffer buffer;
+    GfxBuffer scratch;   // Kept by a TLAS for updates
+    GfxBuffer instances; // TLAS only
+    uint32_t instanceCapacity;
+    uint32_t primitiveCount; // Triangles of a BLAS, instances of a TLAS
+} GfxAccelerationStructure;
+
 // Describes one stage of a shader. Give either a path or SPIR-V byte code.
 // Paths ending in .spv are loaded as SPIR-V, anything else is compiled as GLSL
 // and may use #include with paths relative to the including file. The stage
@@ -414,6 +463,7 @@ typedef struct GfxShaderBinding {
     const GfxTexture* pTextures; // count textures
     const GfxImage* pImage;
     VkImageLayout imageLayout;
+    const GfxAccelerationStructure* pAccelerationStructure;
 
     bool reported; // Whether a missing resource has been reported
 } GfxShaderBinding;
@@ -462,6 +512,7 @@ typedef struct GfxShader {
     uint32_t stageCount;
     GfxShaderStage* pStages;
     VkShaderStageFlags stages;
+    uint32_t version; // Advanced by gfxReloadShader()
 
     uint32_t setCount;
     GfxShaderSet* pSets;
@@ -479,13 +530,39 @@ typedef struct GfxShader {
     VkDescriptorImageInfo* pWrittenImageInfos;
     VkDescriptorBufferInfo* pResolvedBufferInfos;
     VkDescriptorImageInfo* pResolvedImageInfos;
-    VkWriteDescriptorSet* pWrites; // Scratch, one per binding
+    VkAccelerationStructureKHR* pWrittenAccelerationStructures;
+    VkAccelerationStructureKHR* pResolvedAccelerationStructures;
+    VkWriteDescriptorSet* pWrites;                                              // Scratch, one per binding
+    VkWriteDescriptorSetAccelerationStructureKHR* pAccelerationStructureWrites; // Scratch, one per binding
 
     uint32_t poolCount;
     VkDescriptorPool* pPools;
     uint32_t poolSizeCount;
     VkDescriptorPoolSize* pPoolSizes;
 } GfxShader;
+
+// Ray tracing pipeline built from a shader with ray tracing stages, together
+// with its shader binding table. Shader groups follow the order of the
+// shader's stages: every ray generation, miss and callable stage is a group of
+// its own, in the order given, and consecutive closest hit, any hit and
+// intersection stages form one hit group. A new hit group starts when a stage
+// of a kind the current group already has comes along, so [closest hit, any
+// hit, closest hit] gives two hit groups. Create the pipeline with
+// gfxCreateRayTracingPipeline(), bind it with gfxCmdBindRayTracingPipeline()
+// and the shader's resources with gfxCmdBindResources(), then trace with
+// gfxCmdTraceRays(). The pipeline is rebuilt on bind if its shader was
+// reloaded. Release resources with gfxDestroyRayTracingPipeline().
+typedef struct GfxRayTracingPipeline {
+    VkPipeline pipeline;
+    GfxShader* pShader;
+    uint32_t shaderVersion;
+    uint32_t maxRecursionDepth;
+    GfxBuffer shaderBindingTable;
+    VkStridedDeviceAddressRegionKHR raygenRegion;
+    VkStridedDeviceAddressRegionKHR missRegion;
+    VkStridedDeviceAddressRegionKHR hitRegion;
+    VkStridedDeviceAddressRegionKHR callableRegion;
+} GfxRayTracingPipeline;
 
 
 // Monolithic global variables //
@@ -495,9 +572,9 @@ extern GfxSwapchain gfxSwapchain;
 
 // Load a device level function pointer as Xvk...(). The entry points used by
 // GFX itself are already cached in gfxDevice.fn; use this for any others, for
-// instance the ray tracing entry points:
-//     VK_LOAD(vkCmdTraceRaysKHR);
-//     XvkCmdTraceRaysKHR(cmd, ...);
+// instance:
+//     VK_LOAD(vkCmdDrawMeshTasksEXT);
+//     XvkCmdDrawMeshTasksEXT(cmd, ...);
 // Prefer hoisting the load out of hot loops, since it is a loader lookup.
 #define VK_LOAD(func_name)                                                                                             \
     PFN_##func_name X##func_name = (PFN_##func_name)vkGetDeviceProcAddr(gfxDevice.device, #func_name)
@@ -607,6 +684,14 @@ void gfxDestroyBuffer(GfxBuffer* pBuffer);
 /// <param name="size">Size of data to copy in bytes</param>
 /// <param name="offset">Offset into buffer's device memory to put the data</param>
 void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset);
+
+/// <summary>
+/// Get the device address of a buffer. The buffer must have been created with
+/// VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT.
+/// </summary>
+/// <param name="pBuffer">Buffer to use</param>
+/// <returns>Device address of the start of the buffer</returns>
+VkDeviceAddress gfxGetBufferDeviceAddress(const GfxBuffer* pBuffer);
 
 /// <summary>
 /// Create a new image.
@@ -838,6 +923,17 @@ void gfxSetShaderTextureArray(GfxShader* pShader, const char* pName, uint32_t te
 void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkImageLayout layout);
 
 /// <summary>
+/// Attach a top level acceleration structure to a named acceleration structure
+/// in the shader.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name</param>
+/// <param name="pAccelerationStructure">Acceleration structure to attach, must stay at the same address while
+/// attached</param>
+void gfxSetShaderAccelerationStructure(GfxShader* pShader, const char* pName,
+                                       const GfxAccelerationStructure* pAccelerationStructure);
+
+/// <summary>
 /// Bind a shader. For graphics shaders, the graphics stages that the shader
 /// does not have are bound to null. Ray tracing shaders cannot be bound like
 /// this, they are used through a ray tracing pipeline.
@@ -865,6 +961,84 @@ void gfxCmdBindResources(VkCommandBuffer cmd, GfxShader* pShader);
 /// <param name="pData">Data to push</param>
 void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t offset, uint32_t size,
                          const void* pData);
+
+/// <summary>
+/// Create a bottom level acceleration structure from triangle geometry. The
+/// build is submitted and waited for.
+/// </summary>
+/// <param name="geometryCount">Number of geometries</param>
+/// <param name="pGeometries">List of geometries</param>
+/// <param name="flags">Build flags, for instance VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR</param>
+/// <param name="pBLAS">Where the created acceleration structure will be stored</param>
+void gfxCreateBLAS(uint32_t geometryCount, const GfxGeometryDesc* pGeometries,
+                   VkBuildAccelerationStructureFlagsKHR flags, GfxAccelerationStructure* pBLAS);
+
+/// <summary>
+/// Create a top level acceleration structure from instances of bottom level
+/// acceleration structures. The build is submitted and waited for. Use
+/// gfxAccelerationStructureInstance() to fill in instances.
+/// </summary>
+/// <param name="instanceCount">Number of instances, also the most that later updates can have</param>
+/// <param name="pInstances">List of instances</param>
+/// <param name="flags">Build flags. With VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR, updates that keep
+/// the instance count refit the structure instead of rebuilding it.</param>
+/// <param name="pTLAS">Where the created acceleration structure will be stored</param>
+void gfxCreateTLAS(uint32_t instanceCount, const VkAccelerationStructureInstanceKHR* pInstances,
+                   VkBuildAccelerationStructureFlagsKHR flags, GfxAccelerationStructure* pTLAS);
+
+/// <summary>
+/// Record a change of the instances of a top level acceleration structure.
+/// The instances are copied into the command buffer, and the update is
+/// synchronized with earlier and later use of the acceleration structure.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pTLAS">Top level acceleration structure to update</param>
+/// <param name="instanceCount">Number of instances, at most what the TLAS was created with</param>
+/// <param name="pInstances">List of instances</param>
+void gfxCmdUpdateTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, uint32_t instanceCount,
+                      const VkAccelerationStructureInstanceKHR* pInstances);
+
+/// <summary>
+/// Release resources for an acceleration structure.
+/// </summary>
+/// <param name="pAccelerationStructure">Acceleration structure to destroy</param>
+void gfxDestroyAccelerationStructure(GfxAccelerationStructure* pAccelerationStructure);
+
+/// <summary>
+/// Create a ray tracing pipeline and its shader binding table from a shader
+/// with ray tracing stages. The shader must have exactly one ray generation
+/// stage.
+/// </summary>
+/// <param name="pShader">Shader to use, must stay at the same address while the pipeline exists</param>
+/// <param name="maxRecursionDepth">How deep traceRayEXT() calls can be nested, 1 if only the ray generation
+/// stage traces rays</param>
+/// <param name="pPipeline">Where the created pipeline will be stored</param>
+void gfxCreateRayTracingPipeline(GfxShader* pShader, uint32_t maxRecursionDepth, GfxRayTracingPipeline* pPipeline);
+
+/// <summary>
+/// Release resources for a ray tracing pipeline. The shader is not destroyed.
+/// </summary>
+/// <param name="pPipeline">Pipeline to destroy</param>
+void gfxDestroyRayTracingPipeline(GfxRayTracingPipeline* pPipeline);
+
+/// <summary>
+/// Bind a ray tracing pipeline. If its shader has been reloaded since the
+/// pipeline was built, the pipeline is rebuilt first.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pPipeline">Pipeline to bind</param>
+void gfxCmdBindRayTracingPipeline(VkCommandBuffer cmd, GfxRayTracingPipeline* pPipeline);
+
+/// <summary>
+/// Trace rays with the bound ray tracing pipeline.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pPipeline">Pipeline whose shader binding table to use</param>
+/// <param name="width">Number of rays in x</param>
+/// <param name="height">Number of rays in y</param>
+/// <param name="depth">Number of rays in z</param>
+void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline, uint32_t width, uint32_t height,
+                     uint32_t depth);
 
 /// <summary>
 /// Set default states for rendering using shader objects. Viewport, scissor and
@@ -1117,6 +1291,47 @@ static inline void gfxTransitionForBlitting(VkCommandBuffer cmd, GfxImage* pImag
                     VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, pImage->image,
                     NULL);
+}
+
+/// <summary>
+/// Convert a column major 4x4 matrix, as used by GLSL and most math libraries,
+/// to the row major 3x4 matrix of an acceleration structure instance.
+/// </summary>
+/// <param name="pColumnMajor">16 floats in column major order</param>
+/// <returns>The transform of an instance</returns>
+static inline VkTransformMatrixKHR gfxTransformMatrix(const float* pColumnMajor)
+{
+    VkTransformMatrixKHR transform;
+    for (uint32_t row = 0; row < 3; row++) {
+        for (uint32_t column = 0; column < 4; column++) {
+            transform.matrix[row][column] = pColumnMajor[column * 4 + row];
+        }
+    }
+    return transform;
+}
+
+/// <summary>
+/// Make an instance of a bottom level acceleration structure for a top level
+/// acceleration structure. The instance is visible to all rays, uses the first
+/// hit group and has culling disabled; change the returned instance for
+/// anything else.
+/// </summary>
+/// <param name="pBLAS">Bottom level acceleration structure to instance</param>
+/// <param name="pTransform">Column major 4x4 transform, as 16 floats</param>
+/// <param name="customIndex">Value of gl_InstanceCustomIndexEXT, 24 bits</param>
+/// <returns>The instance</returns>
+static inline VkAccelerationStructureInstanceKHR
+gfxAccelerationStructureInstance(const GfxAccelerationStructure* pBLAS, const float* pTransform, uint32_t customIndex)
+{
+    VkAccelerationStructureInstanceKHR instance = {
+        .transform = gfxTransformMatrix(pTransform),
+        .instanceCustomIndex = customIndex & 0xffffff,
+        .mask = 0xff,
+        .instanceShaderBindingTableRecordOffset = 0,
+        .flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR,
+        .accelerationStructureReference = pBLAS->address,
+    };
+    return instance;
 }
 
 // Define GFX_IMPLEMENTATION in exactly one compilation unit before
@@ -1388,8 +1603,13 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     GFX_INFO("Available devices (%d):", n);
     for (uint32_t i = 0; i < n; i++) {
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR asp = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+        };
+
         VkPhysicalDeviceRayTracingPipelinePropertiesKHR rtp = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR,
+            .pNext = &asp,
         };
 
         VkPhysicalDeviceDriverProperties driver = {
@@ -1409,6 +1629,9 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
             vkGetPhysicalDeviceProperties(gfxDevice.physicalDevice, &gfxDevice.properties.physicalDevice);
             vkGetPhysicalDeviceMemoryProperties(gfxDevice.physicalDevice, &gfxDevice.properties.memory);
             gfxDevice.properties.rayTracingPipeline = rtp;
+            gfxDevice.properties.rayTracingPipeline.pNext = NULL;
+            gfxDevice.properties.accelerationStructure = asp;
+            gfxDevice.properties.accelerationStructure.pNext = NULL;
         }
 
         GFX_INFO(" * [%d] %s, driver: %s %s, Vulkan %d.%d.%d %s", i, prop.properties.deviceName, driver.driverName,
@@ -1484,7 +1707,25 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_LOAD_FN(vkCmdSetLogicOpEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorBlendEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorWriteMaskEXT);
+    GFX_LOAD_FN(vkCreateAccelerationStructureKHR);
+    GFX_LOAD_FN(vkDestroyAccelerationStructureKHR);
+    GFX_LOAD_FN(vkGetAccelerationStructureBuildSizesKHR);
+    GFX_LOAD_FN(vkGetAccelerationStructureDeviceAddressKHR);
+    GFX_LOAD_FN(vkCmdBuildAccelerationStructuresKHR);
+    GFX_LOAD_FN(vkCreateRayTracingPipelinesKHR);
+    GFX_LOAD_FN(vkGetRayTracingShaderGroupHandlesKHR);
+    GFX_LOAD_FN(vkCmdTraceRaysKHR);
 #undef GFX_LOAD_FN
+
+    // Entry points of extensions that are not enabled are not reliably NULL,
+    // so what is enabled is taken from the extension list
+    for (uint32_t i = 0; i < deviceExtensionCount; i++) {
+        if (!strcmp(ppDeviceExtensions[i], VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
+            gfxDevice.accelerationStructures = true;
+        } else if (!strcmp(ppDeviceExtensions[i], VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
+            gfxDevice.rayTracingPipelines = true;
+        }
+    }
 
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -2080,6 +2321,20 @@ void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDevice
         char* pOffsettedHostMap = (char*)pBuffer->pHostMap + offset;
         memcpy(pOffsettedHostMap, pData, size);
     }
+}
+
+VkDeviceAddress gfxGetBufferDeviceAddress(const GfxBuffer* pBuffer)
+{
+    if (!(pBuffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT)) {
+        GFX_ERROR("Buffer was not created with VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT");
+        return 0;
+    }
+
+    VkBufferDeviceAddressInfo info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = pBuffer->buffer,
+    };
+    return vkGetBufferDeviceAddress(gfxDevice.device, &info);
 }
 
 void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels, VkSampleCountFlagBits samples,
@@ -3732,7 +3987,11 @@ static bool createLayouts(GfxShader* pShader, bool fatal)
     pShader->pWrittenImageInfos = allocZeroed(infoCount, sizeof *pShader->pWrittenImageInfos);
     pShader->pResolvedBufferInfos = allocZeroed(infoCount, sizeof *pShader->pResolvedBufferInfos);
     pShader->pResolvedImageInfos = allocZeroed(infoCount, sizeof *pShader->pResolvedImageInfos);
+    pShader->pWrittenAccelerationStructures = allocZeroed(infoCount, sizeof *pShader->pWrittenAccelerationStructures);
+    pShader->pResolvedAccelerationStructures = allocZeroed(infoCount, sizeof *pShader->pResolvedAccelerationStructures);
     pShader->pWrites = allocZeroed(GFX_MAX(pShader->bindingCount, 1), sizeof *pShader->pWrites);
+    pShader->pAccelerationStructureWrites =
+        allocZeroed(GFX_MAX(pShader->bindingCount, 1), sizeof *pShader->pAccelerationStructureWrites);
 
     return true;
 }
@@ -3942,7 +4201,10 @@ void gfxDestroyShader(GfxShader* pShader)
     GFX_FREE(pShader->pWrittenImageInfos);
     GFX_FREE(pShader->pResolvedBufferInfos);
     GFX_FREE(pShader->pResolvedImageInfos);
+    GFX_FREE(pShader->pWrittenAccelerationStructures);
+    GFX_FREE(pShader->pResolvedAccelerationStructures);
     GFX_FREE(pShader->pWrites);
+    GFX_FREE(pShader->pAccelerationStructureWrites);
 
     GFX_RESET(pShader);
 }
@@ -3988,7 +4250,7 @@ bool gfxReloadShader(GfxShader* pShader)
     // sets and bindings
     for (uint32_t i = 0; i < pShader->bindingCount; i++) {
         const GfxShaderBinding* pOld = &pShader->pBindings[i];
-        if (!pOld->pBuffer && !pOld->pTextures && !pOld->pImage) {
+        if (!pOld->pBuffer && !pOld->pTextures && !pOld->pImage && !pOld->pAccelerationStructure) {
             continue;
         }
 
@@ -4005,7 +4267,11 @@ bool gfxReloadShader(GfxShader* pShader)
         pNew->pTextures = pOld->pTextures;
         pNew->pImage = pOld->pImage;
         pNew->imageLayout = pOld->imageLayout;
+        pNew->pAccelerationStructure = pOld->pAccelerationStructure;
     }
+
+    // Lets pipelines built from the shader notice that it changed
+    reloaded.version = pShader->version + 1;
 
     gfxDestroyShader(pShader);
     *pShader = reloaded;
@@ -4036,6 +4302,7 @@ static GfxShaderBinding* resolveBinding(GfxShader* pShader, const char* pName, c
             pBinding->pBuffer = NULL;
             pBinding->pTextures = NULL;
             pBinding->pImage = NULL;
+            pBinding->pAccelerationStructure = NULL;
             return pBinding;
         }
     }
@@ -4126,6 +4393,31 @@ void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pI
     pBinding->imageLayout = layout;
 }
 
+void gfxSetShaderAccelerationStructure(GfxShader* pShader, const char* pName,
+                                       const GfxAccelerationStructure* pAccelerationStructure)
+{
+    static const VkDescriptorType allowed[] = {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR};
+
+    GfxShaderBinding* pBinding =
+        resolveBinding(pShader, pName, "acceleration structure", allowed, GFX_ARRAY_LEN(allowed));
+    if (!pBinding) {
+        return;
+    }
+
+    if (pBinding->count != 1) {
+        GFX_ERROR("'%s' is an array of %" PRIu32 " acceleration structures, which cannot be attached", pName,
+                  pBinding->count);
+        return;
+    }
+
+    if (pAccelerationStructure->type != VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
+        GFX_ERROR("Only top level acceleration structures can be attached to '%s'", pName);
+        return;
+    }
+
+    pBinding->pAccelerationStructure = pAccelerationStructure;
+}
+
 void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader)
 {
     if (pShader->stages & GFX_RAY_TRACING_STAGES) {
@@ -4185,6 +4477,8 @@ static uint32_t resolveSet(GfxShader* pShader, const GfxShaderSet* pSet)
 {
     memset(&pShader->pResolvedBufferInfos[pSet->firstInfo], 0, pSet->infoCount * sizeof *pShader->pResolvedBufferInfos);
     memset(&pShader->pResolvedImageInfos[pSet->firstInfo], 0, pSet->infoCount * sizeof *pShader->pResolvedImageInfos);
+    memset(&pShader->pResolvedAccelerationStructures[pSet->firstInfo], 0,
+           pSet->infoCount * sizeof *pShader->pResolvedAccelerationStructures);
 
     uint32_t resolved = 0;
 
@@ -4228,6 +4522,14 @@ static uint32_t resolveSet(GfxShader* pShader, const GfxShaderSet* pSet)
             pImageInfos[0].imageView = pBinding->pImage->imageView;
             pImageInfos[0].imageLayout = pBinding->imageLayout;
             resolved++;
+        } else if (pBinding->pAccelerationStructure) {
+            if (!pBinding->pAccelerationStructure->accelerationStructure) {
+                GFX_ERROR("The acceleration structure attached to '%s' has been destroyed", bindingName(pBinding));
+                continue;
+            }
+            pShader->pResolvedAccelerationStructures[pBinding->infoIndex] =
+                pBinding->pAccelerationStructure->accelerationStructure;
+            resolved++;
         } else if (!pBinding->reported) {
             GFX_WARNING("%s: '%s' (set %" PRIu32 ", binding %" PRIu32 ") has nothing attached", shaderName(pShader),
                         bindingName(pBinding), pBinding->set, pBinding->binding);
@@ -4247,7 +4549,10 @@ static bool setChanged(const GfxShader* pShader, const GfxShaderSet* pSet)
     return memcmp(&pShader->pResolvedBufferInfos[pSet->firstInfo], &pShader->pWrittenBufferInfos[pSet->firstInfo],
                   pSet->infoCount * sizeof *pShader->pResolvedBufferInfos) ||
            memcmp(&pShader->pResolvedImageInfos[pSet->firstInfo], &pShader->pWrittenImageInfos[pSet->firstInfo],
-                  pSet->infoCount * sizeof *pShader->pResolvedImageInfos);
+                  pSet->infoCount * sizeof *pShader->pResolvedImageInfos) ||
+           memcmp(&pShader->pResolvedAccelerationStructures[pSet->firstInfo],
+                  &pShader->pWrittenAccelerationStructures[pSet->firstInfo],
+                  pSet->infoCount * sizeof *pShader->pResolvedAccelerationStructures);
 }
 
 static void createDescriptorPool(GfxShader* pShader)
@@ -4344,6 +4649,9 @@ static void writeDescriptorSet(GfxShader* pShader, GfxShaderSet* pSet)
            pSet->infoCount * sizeof *pShader->pWrittenBufferInfos);
     memcpy(&pShader->pWrittenImageInfos[pSet->firstInfo], &pShader->pResolvedImageInfos[pSet->firstInfo],
            pSet->infoCount * sizeof *pShader->pWrittenImageInfos);
+    memcpy(&pShader->pWrittenAccelerationStructures[pSet->firstInfo],
+           &pShader->pResolvedAccelerationStructures[pSet->firstInfo],
+           pSet->infoCount * sizeof *pShader->pWrittenAccelerationStructures);
 
     uint32_t writeCount = 0;
     for (uint32_t i = 0; i < pSet->bindingCount; i++) {
@@ -4365,6 +4673,16 @@ static void writeDescriptorSet(GfxShader* pShader, GfxShaderSet* pSet)
             write.pBufferInfo = pBufferInfo;
         } else if (isImageDescriptor(pBinding->type) && (pImageInfo->imageView || pImageInfo->sampler)) {
             write.pImageInfo = pImageInfo;
+        } else if (pBinding->type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR &&
+                   pShader->pWrittenAccelerationStructures[pBinding->infoIndex]) {
+            VkWriteDescriptorSetAccelerationStructureKHR* pAccelerationStructureWrite =
+                &pShader->pAccelerationStructureWrites[writeCount];
+            *pAccelerationStructureWrite = (VkWriteDescriptorSetAccelerationStructureKHR){
+                .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                .accelerationStructureCount = pBinding->count,
+                .pAccelerationStructures = &pShader->pWrittenAccelerationStructures[pBinding->infoIndex],
+            };
+            write.pNext = pAccelerationStructureWrite;
         } else {
             continue;
         }
@@ -4411,6 +4729,608 @@ void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t
     }
 
     vkCmdPushConstants(cmd, pShader->pipelineLayout, pShader->pushConstantRange.stageFlags, offset, size, pData);
+}
+
+// Acceleration structures //
+
+static void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                          VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+{
+    VkMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask = dstStage,
+        .dstAccessMask = dstAccess,
+    };
+
+    VkDependencyInfo dependencyInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+}
+
+// Scratch memory has to be aligned beyond what buffers are, so the buffer is
+// made larger and the address aligned up
+static void createScratchBuffer(VkDeviceSize size, GfxBuffer* pScratch)
+{
+    VkDeviceSize alignment =
+        GFX_MAX(gfxDevice.properties.accelerationStructure.minAccelerationStructureScratchOffsetAlignment, 1);
+    gfxCreateBuffer(size + alignment, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, pScratch);
+}
+
+static VkDeviceAddress scratchAddress(const GfxBuffer* pScratch)
+{
+    VkDeviceSize alignment =
+        GFX_MAX(gfxDevice.properties.accelerationStructure.minAccelerationStructureScratchOffsetAlignment, 1);
+    return gfxAlignTo(gfxGetBufferDeviceAddress(pScratch), alignment);
+}
+
+static void createAccelerationStructure(GfxAccelerationStructure* pAccelerationStructure,
+                                        VkAccelerationStructureTypeKHR type, VkDeviceSize size)
+{
+    gfxCreateBuffer(size,
+                    VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pAccelerationStructure->buffer);
+
+    VkAccelerationStructureCreateInfoKHR ci = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR,
+        .buffer = pAccelerationStructure->buffer.buffer,
+        .offset = 0,
+        .size = size,
+        .type = type,
+    };
+    VK_CHECK(gfxDevice.fn.vkCreateAccelerationStructureKHR(gfxDevice.device, &ci, NULL,
+                                                           &pAccelerationStructure->accelerationStructure));
+
+    VkAccelerationStructureDeviceAddressInfoKHR addressInfo = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR,
+        .accelerationStructure = pAccelerationStructure->accelerationStructure,
+    };
+    pAccelerationStructure->address =
+        gfxDevice.fn.vkGetAccelerationStructureDeviceAddressKHR(gfxDevice.device, &addressInfo);
+    pAccelerationStructure->type = type;
+}
+
+static bool checkBuildInput(const GfxBuffer* pBuffer, const char* pKind)
+{
+    const VkBufferUsageFlags required = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+
+    if (!pBuffer || (pBuffer->usage & required) != required) {
+        GFX_ERROR("The %s buffer of an acceleration structure needs VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT and "
+                  "VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR",
+                  pKind);
+        return false;
+    }
+    return true;
+}
+
+void gfxCreateBLAS(uint32_t geometryCount, const GfxGeometryDesc* pGeometries,
+                   VkBuildAccelerationStructureFlagsKHR flags, GfxAccelerationStructure* pBLAS)
+{
+    GFX_RESET(pBLAS);
+
+    if (!gfxDevice.accelerationStructures) {
+        GFX_ERROR("Acceleration structures need VK_KHR_acceleration_structure to be enabled");
+        return;
+    }
+
+    if (!geometryCount) {
+        GFX_ERROR("A bottom level acceleration structure needs at least one geometry");
+        return;
+    }
+
+    VkAccelerationStructureGeometryKHR* pGeometryInfos = allocZeroed(geometryCount, sizeof *pGeometryInfos);
+    VkAccelerationStructureBuildRangeInfoKHR* pRanges = allocZeroed(geometryCount, sizeof *pRanges);
+    uint32_t* pPrimitiveCounts = allocZeroed(geometryCount, sizeof *pPrimitiveCounts);
+
+    for (uint32_t i = 0; i < geometryCount; i++) {
+        const GfxGeometryDesc* pDesc = &pGeometries[i];
+
+        if (!checkBuildInput(pDesc->pVertexBuffer, "vertex") ||
+            (pDesc->pIndexBuffer && !checkBuildInput(pDesc->pIndexBuffer, "index"))) {
+            goto done;
+        }
+
+        VkDeviceAddress vertexAddress = gfxGetBufferDeviceAddress(pDesc->pVertexBuffer) + pDesc->vertexOffset;
+        VkDeviceAddress indexAddress =
+            pDesc->pIndexBuffer ? gfxGetBufferDeviceAddress(pDesc->pIndexBuffer) + pDesc->indexOffset : 0;
+
+        pGeometryInfos[i] = (VkAccelerationStructureGeometryKHR){
+            .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+            .geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR,
+            .geometry.triangles =
+                {
+                    .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR,
+                    .vertexFormat = pDesc->vertexFormat ? pDesc->vertexFormat : VK_FORMAT_R32G32B32_SFLOAT,
+                    .vertexData.deviceAddress = vertexAddress,
+                    .vertexStride = pDesc->vertexStride,
+                    .maxVertex = pDesc->vertexCount ? pDesc->vertexCount - 1 : 0,
+                    .indexType = pDesc->pIndexBuffer ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_NONE_KHR,
+                    .indexData.deviceAddress = indexAddress,
+                },
+            .flags = pDesc->flags,
+        };
+
+        pPrimitiveCounts[i] = (pDesc->pIndexBuffer ? pDesc->indexCount : pDesc->vertexCount) / 3;
+        pRanges[i].primitiveCount = pPrimitiveCounts[i];
+        pBLAS->primitiveCount += pPrimitiveCounts[i];
+    }
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+        .flags = flags,
+        .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .geometryCount = geometryCount,
+        .pGeometries = pGeometryInfos,
+    };
+
+    VkAccelerationStructureBuildSizesInfoKHR sizes = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+    };
+    gfxDevice.fn.vkGetAccelerationStructureBuildSizesKHR(
+        gfxDevice.device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, pPrimitiveCounts, &sizes);
+
+    pBLAS->flags = flags;
+    createAccelerationStructure(pBLAS, VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR,
+                                sizes.accelerationStructureSize);
+
+    // Bottom level structures are not updated, so the scratch memory is only
+    // needed for the build
+    GfxBuffer scratch;
+    createScratchBuffer(sizes.buildScratchSize, &scratch);
+
+    buildInfo.dstAccelerationStructure = pBLAS->accelerationStructure;
+    buildInfo.scratchData.deviceAddress = scratchAddress(&scratch);
+
+    VkCommandBuffer cmd = gfxCmdBegin();
+    const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfos = pRanges;
+    gfxDevice.fn.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfos);
+    gfxCmdEnd(cmd);
+
+    gfxDestroyBuffer(&scratch);
+
+done:
+    GFX_FREE(pPrimitiveCounts);
+    GFX_FREE(pRanges);
+    GFX_FREE(pGeometryInfos);
+}
+
+// Record a build or update of a top level acceleration structure, with the
+// barriers that order it after earlier and before later use of the structure
+static void cmdBuildTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, uint32_t instanceCount,
+                         const VkAccelerationStructureInstanceKHR* pInstances, bool update)
+{
+    // Earlier traces may still read the structure and the instances, and an
+    // earlier build may still use the scratch memory
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                      VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+
+    // The instances are recorded into the command buffer, so the host never
+    // writes memory that a frame in flight reads. Updates are limited to 64 kB
+    // each.
+    const VkDeviceSize maxUpdateSize = 65536;
+    VkDeviceSize size = (VkDeviceSize)instanceCount * sizeof *pInstances;
+    for (VkDeviceSize offset = 0; offset < size; offset += maxUpdateSize) {
+        vkCmdUpdateBuffer(cmd, pTLAS->instances.buffer, offset, GFX_MIN(size - offset, maxUpdateSize),
+                          (const char*)pInstances + offset);
+    }
+
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
+
+    VkAccelerationStructureGeometryKHR geometry = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+        .geometry.instances =
+            {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                .arrayOfPointers = VK_FALSE,
+                .data.deviceAddress = gfxGetBufferDeviceAddress(&pTLAS->instances),
+            },
+    };
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+        .flags = pTLAS->flags,
+        .mode =
+            update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .srcAccelerationStructure = update ? pTLAS->accelerationStructure : VK_NULL_HANDLE,
+        .dstAccelerationStructure = pTLAS->accelerationStructure,
+        .geometryCount = 1,
+        .pGeometries = &geometry,
+        .scratchData.deviceAddress = scratchAddress(&pTLAS->scratch),
+    };
+
+    VkAccelerationStructureBuildRangeInfoKHR range = {.primitiveCount = instanceCount};
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    gfxDevice.fn.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+
+    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+
+    pTLAS->primitiveCount = instanceCount;
+}
+
+void gfxCreateTLAS(uint32_t instanceCount, const VkAccelerationStructureInstanceKHR* pInstances,
+                   VkBuildAccelerationStructureFlagsKHR flags, GfxAccelerationStructure* pTLAS)
+{
+    GFX_RESET(pTLAS);
+
+    if (!gfxDevice.accelerationStructures) {
+        GFX_ERROR("Acceleration structures need VK_KHR_acceleration_structure to be enabled");
+        return;
+    }
+
+    pTLAS->flags = flags;
+    pTLAS->instanceCapacity = GFX_MAX(instanceCount, 1);
+
+    gfxCreateBuffer(pTLAS->instanceCapacity * sizeof(VkAccelerationStructureInstanceKHR),
+                    VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+                        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTLAS->instances);
+
+    // Size the structure for as many instances as it is created with
+    VkAccelerationStructureGeometryKHR geometry = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
+        .geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR,
+        .geometry.instances =
+            {
+                .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR,
+                .data.deviceAddress = gfxGetBufferDeviceAddress(&pTLAS->instances),
+            },
+    };
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
+        .type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR,
+        .flags = flags,
+        .mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
+        .geometryCount = 1,
+        .pGeometries = &geometry,
+    };
+
+    VkAccelerationStructureBuildSizesInfoKHR sizes = {
+        .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR,
+    };
+    gfxDevice.fn.vkGetAccelerationStructureBuildSizesKHR(gfxDevice.device,
+                                                         VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo,
+                                                         &pTLAS->instanceCapacity, &sizes);
+
+    createAccelerationStructure(pTLAS, VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR, sizes.accelerationStructureSize);
+
+    // The scratch memory is kept, since later updates and rebuilds need it
+    createScratchBuffer(GFX_MAX(sizes.buildScratchSize, sizes.updateScratchSize), &pTLAS->scratch);
+
+    VkCommandBuffer cmd = gfxCmdBegin();
+    cmdBuildTLAS(cmd, pTLAS, instanceCount, pInstances, false);
+    gfxCmdEnd(cmd);
+}
+
+void gfxCmdUpdateTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, uint32_t instanceCount,
+                      const VkAccelerationStructureInstanceKHR* pInstances)
+{
+    if (pTLAS->type != VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR) {
+        GFX_ERROR("Only top level acceleration structures can be updated");
+        return;
+    }
+
+    if (instanceCount > pTLAS->instanceCapacity) {
+        GFX_ERROR("Updating with %" PRIu32 " instances, but the acceleration structure was created for %" PRIu32,
+                  instanceCount, pTLAS->instanceCapacity);
+        return;
+    }
+
+    // Refitting keeps the structure of the previous build, which is only
+    // possible when it was allowed and the instance count is the same
+    bool update =
+        (pTLAS->flags & VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR) && instanceCount == pTLAS->primitiveCount;
+
+    cmdBuildTLAS(cmd, pTLAS, instanceCount, pInstances, update);
+}
+
+void gfxDestroyAccelerationStructure(GfxAccelerationStructure* pAccelerationStructure)
+{
+    vkDeviceWaitIdle(gfxDevice.device);
+
+    if (pAccelerationStructure->accelerationStructure) {
+        gfxDevice.fn.vkDestroyAccelerationStructureKHR(gfxDevice.device, pAccelerationStructure->accelerationStructure,
+                                                       NULL);
+    }
+
+    GfxBuffer* buffers[] = {&pAccelerationStructure->buffer, &pAccelerationStructure->scratch,
+                            &pAccelerationStructure->instances};
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(buffers); i++) {
+        if (buffers[i]->buffer) {
+            gfxDestroyBuffer(buffers[i]);
+        }
+    }
+
+    gfxDevice.resourceGeneration++;
+
+    GFX_RESET(pAccelerationStructure);
+}
+
+
+// Ray tracing pipelines //
+
+static VkRayTracingShaderGroupCreateInfoKHR generalShaderGroup(uint32_t stage)
+{
+    return (VkRayTracingShaderGroupCreateInfoKHR){
+        .sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,
+        .type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,
+        .generalShader = stage,
+        .closestHitShader = VK_SHADER_UNUSED_KHR,
+        .anyHitShader = VK_SHADER_UNUSED_KHR,
+        .intersectionShader = VK_SHADER_UNUSED_KHR,
+    };
+}
+
+static VkStridedDeviceAddressRegionKHR shaderBindingTableRegion(VkDeviceAddress address, VkDeviceSize stride,
+                                                                uint32_t count)
+{
+    if (!count) {
+        return (VkStridedDeviceAddressRegionKHR){0};
+    }
+    return (VkStridedDeviceAddressRegionKHR){
+        .deviceAddress = address,
+        .stride = stride,
+        .size = stride * count,
+    };
+}
+
+static void createRayTracingPipeline(GfxRayTracingPipeline* pPipeline)
+{
+    const GfxShader* pShader = pPipeline->pShader;
+    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR* pProperties = &gfxDevice.properties.rayTracingPipeline;
+
+    if (pPipeline->maxRecursionDepth > pProperties->maxRayRecursionDepth) {
+        GFX_ERROR("A recursion depth of %" PRIu32 " was asked for, but the device supports %" PRIu32,
+                  pPipeline->maxRecursionDepth, pProperties->maxRayRecursionDepth);
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo* pStages = allocZeroed(pShader->stageCount, sizeof *pStages);
+    VkShaderModule* pModules = allocZeroed(pShader->stageCount, sizeof *pModules);
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        const GfxShaderStage* pStage = &pShader->pStages[i];
+
+        VkShaderModuleCreateInfo ci = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = pStage->codeSize,
+            .pCode = pStage->pCode,
+        };
+        VK_CHECK(vkCreateShaderModule(gfxDevice.device, &ci, NULL, &pModules[i]));
+
+        pStages[i] = (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = pStage->stage,
+            .module = pModules[i],
+            .pName = "main",
+            .pSpecializationInfo = pStage->pSpecializationInfo,
+        };
+    }
+
+    // Groups are laid out as they will be in the shader binding table: ray
+    // generation, miss, hit and callable. A shader has at most one group per
+    // stage.
+    VkRayTracingShaderGroupCreateInfoKHR* pGroups = allocZeroed(pShader->stageCount, sizeof *pGroups);
+    uint32_t groupCount = 0;
+    uint32_t raygenCount = 0;
+    uint32_t missCount = 0;
+    uint32_t hitCount = 0;
+    uint32_t callableCount = 0;
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        if (pShader->pStages[i].stage == VK_SHADER_STAGE_RAYGEN_BIT_KHR) {
+            pGroups[groupCount++] = generalShaderGroup(i);
+            raygenCount++;
+        }
+    }
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        if (pShader->pStages[i].stage == VK_SHADER_STAGE_MISS_BIT_KHR) {
+            pGroups[groupCount++] = generalShaderGroup(i);
+            missCount++;
+        }
+    }
+
+    // Consecutive hit stages form a group, until a kind of stage repeats
+    VkRayTracingShaderGroupCreateInfoKHR* pHitGroup = NULL;
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        VkShaderStageFlagBits stage = pShader->pStages[i].stage;
+
+        uint32_t* pSlot = NULL;
+        if (pHitGroup) {
+            switch (stage) {
+            case VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:
+                pSlot = &pHitGroup->closestHitShader;
+                break;
+            case VK_SHADER_STAGE_ANY_HIT_BIT_KHR:
+                pSlot = &pHitGroup->anyHitShader;
+                break;
+            case VK_SHADER_STAGE_INTERSECTION_BIT_KHR:
+                pSlot = &pHitGroup->intersectionShader;
+                break;
+            default:
+                // Any other stage ends the group
+                pHitGroup = NULL;
+                continue;
+            }
+        } else if (stage != VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR && stage != VK_SHADER_STAGE_ANY_HIT_BIT_KHR &&
+                   stage != VK_SHADER_STAGE_INTERSECTION_BIT_KHR) {
+            continue;
+        }
+
+        if (!pHitGroup || *pSlot != VK_SHADER_UNUSED_KHR) {
+            pHitGroup = &pGroups[groupCount++];
+            *pHitGroup = generalShaderGroup(VK_SHADER_UNUSED_KHR);
+            pHitGroup->type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+            hitCount++;
+        }
+
+        switch (stage) {
+        case VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:
+            pHitGroup->closestHitShader = i;
+            break;
+        case VK_SHADER_STAGE_ANY_HIT_BIT_KHR:
+            pHitGroup->anyHitShader = i;
+            break;
+        default:
+            pHitGroup->intersectionShader = i;
+            pHitGroup->type = VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR;
+            break;
+        }
+    }
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        if (pShader->pStages[i].stage == VK_SHADER_STAGE_CALLABLE_BIT_KHR) {
+            pGroups[groupCount++] = generalShaderGroup(i);
+            callableCount++;
+        }
+    }
+
+    if (raygenCount != 1) {
+        GFX_ERROR("%s has %" PRIu32 " ray generation stages, a ray tracing pipeline needs exactly one",
+                  shaderName(pShader), raygenCount);
+        goto done;
+    }
+
+    VkRayTracingPipelineCreateInfoKHR ci = {
+        .sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+        .stageCount = pShader->stageCount,
+        .pStages = pStages,
+        .groupCount = groupCount,
+        .pGroups = pGroups,
+        .maxPipelineRayRecursionDepth = pPipeline->maxRecursionDepth,
+        .layout = pShader->pipelineLayout,
+    };
+    VK_CHECK(gfxDevice.fn.vkCreateRayTracingPipelinesKHR(gfxDevice.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, NULL,
+                                                         &pPipeline->pipeline));
+
+    // Shader binding table. Every region starts at the base alignment, and
+    // records within a region are a stride apart.
+    uint32_t handleSize = pProperties->shaderGroupHandleSize;
+    VkDeviceSize stride = gfxAlignTo(handleSize, pProperties->shaderGroupHandleAlignment);
+    VkDeviceSize baseAlignment = pProperties->shaderGroupBaseAlignment;
+
+    VkDeviceSize missOffset = gfxAlignTo(stride * raygenCount, baseAlignment);
+    VkDeviceSize hitOffset = gfxAlignTo(missOffset + stride * missCount, baseAlignment);
+    VkDeviceSize callableOffset = gfxAlignTo(hitOffset + stride * hitCount, baseAlignment);
+    VkDeviceSize tableSize = callableOffset + stride * callableCount;
+
+    uint8_t* pHandles = GFX_MALLOC((size_t)groupCount * handleSize);
+    VK_CHECK(gfxDevice.fn.vkGetRayTracingShaderGroupHandlesKHR(gfxDevice.device, pPipeline->pipeline, 0, groupCount,
+                                                               (size_t)groupCount * handleSize, pHandles));
+
+    gfxCreateBuffer(tableSize, VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    &pPipeline->shaderBindingTable);
+
+    uint8_t* pTable = pPipeline->shaderBindingTable.pHostMap;
+    memset(pTable, 0, tableSize);
+
+    // The groups were created in table order
+    VkDeviceSize regionOffsets[] = {0, missOffset, hitOffset, callableOffset};
+    uint32_t regionCounts[] = {raygenCount, missCount, hitCount, callableCount};
+    uint32_t group = 0;
+    for (uint32_t region = 0; region < GFX_ARRAY_LEN(regionOffsets); region++) {
+        for (uint32_t i = 0; i < regionCounts[region]; i++, group++) {
+            memcpy(pTable + regionOffsets[region] + i * stride, pHandles + (size_t)group * handleSize, handleSize);
+        }
+    }
+
+    GFX_FREE(pHandles);
+
+    VkDeviceAddress address = gfxGetBufferDeviceAddress(&pPipeline->shaderBindingTable);
+    pPipeline->raygenRegion = shaderBindingTableRegion(address, stride, raygenCount);
+    pPipeline->missRegion = shaderBindingTableRegion(address + missOffset, stride, missCount);
+    pPipeline->hitRegion = shaderBindingTableRegion(address + hitOffset, stride, hitCount);
+    pPipeline->callableRegion = shaderBindingTableRegion(address + callableOffset, stride, callableCount);
+
+    GFX_INFO("Created ray tracing pipeline: %s", shaderName(pShader));
+    GFX_DEBUG(" * %" PRIu32 " miss, %" PRIu32 " hit and %" PRIu32 " callable groups", missCount, hitCount,
+              callableCount);
+
+done:
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        vkDestroyShaderModule(gfxDevice.device, pModules[i], NULL);
+    }
+    GFX_FREE(pGroups);
+    GFX_FREE(pModules);
+    GFX_FREE(pStages);
+}
+
+static void destroyRayTracingPipeline(GfxRayTracingPipeline* pPipeline)
+{
+    vkDeviceWaitIdle(gfxDevice.device);
+
+    vkDestroyPipeline(gfxDevice.device, pPipeline->pipeline, NULL);
+    pPipeline->pipeline = VK_NULL_HANDLE;
+
+    if (pPipeline->shaderBindingTable.buffer) {
+        gfxDestroyBuffer(&pPipeline->shaderBindingTable);
+    }
+}
+
+void gfxCreateRayTracingPipeline(GfxShader* pShader, uint32_t maxRecursionDepth, GfxRayTracingPipeline* pPipeline)
+{
+    GFX_RESET(pPipeline);
+
+    if (!gfxDevice.rayTracingPipelines) {
+        GFX_ERROR("Ray tracing pipelines need VK_KHR_ray_tracing_pipeline to be enabled");
+        return;
+    }
+
+    if (!(pShader->stages & GFX_RAY_TRACING_STAGES)) {
+        GFX_ERROR("%s has no ray tracing stages", shaderName(pShader));
+        return;
+    }
+
+    pPipeline->pShader = pShader;
+    pPipeline->shaderVersion = pShader->version;
+    pPipeline->maxRecursionDepth = maxRecursionDepth;
+
+    createRayTracingPipeline(pPipeline);
+}
+
+void gfxDestroyRayTracingPipeline(GfxRayTracingPipeline* pPipeline)
+{
+    destroyRayTracingPipeline(pPipeline);
+    GFX_RESET(pPipeline);
+}
+
+void gfxCmdBindRayTracingPipeline(VkCommandBuffer cmd, GfxRayTracingPipeline* pPipeline)
+{
+    // The reload waited for the device, so nothing still uses the old pipeline
+    if (pPipeline->shaderVersion != pPipeline->pShader->version) {
+        destroyRayTracingPipeline(pPipeline);
+        createRayTracingPipeline(pPipeline);
+        pPipeline->shaderVersion = pPipeline->pShader->version;
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, pPipeline->pipeline);
+}
+
+void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline, uint32_t width, uint32_t height,
+                     uint32_t depth)
+{
+    gfxDevice.fn.vkCmdTraceRaysKHR(cmd, &pPipeline->raygenRegion, &pPipeline->missRegion, &pPipeline->hitRegion,
+                                   &pPipeline->callableRegion, width, height, depth);
 }
 
 void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet,

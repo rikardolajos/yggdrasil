@@ -1,0 +1,12 @@
+#version 460
+#include "common.glsl"
+#include "hit.glsl"
+
+// Cut the textured quad into a disc. Shadow rays run this too, so the shadow
+// gets the same shape.
+void main()
+{
+    if (gl_InstanceCustomIndexEXT == TEXTURED_INSTANCE && length(hitTextureCoord() * 2.0 - 1.0) > 1.0) {
+        ignoreIntersectionEXT;
+    }
+}

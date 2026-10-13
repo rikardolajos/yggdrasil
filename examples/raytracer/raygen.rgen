@@ -1,0 +1,27 @@
+#version 460
+#include "common.glsl"
+
+layout(set = 0, binding = 4, rgba8) uniform writeonly image2D outputImage;
+
+// The right and up vectors are scaled to span half the field of view
+layout(set = 0, binding = 5) uniform CameraUniforms {
+    vec4 position;
+    vec4 right;
+    vec4 up;
+    vec4 forward;
+} camera;
+
+layout(location = 0) rayPayloadEXT RayPayload payload;
+
+void main()
+{
+    vec2 pixel = vec2(gl_LaunchIDEXT.xy) + vec2(0.5);
+    vec2 ndc = pixel / vec2(gl_LaunchSizeEXT.xy) * 2.0 - 1.0;
+
+    // Image rows go downwards
+    vec3 direction = normalize(camera.forward.xyz + ndc.x * camera.right.xyz - ndc.y * camera.up.xyz);
+
+    traceRayEXT(scene, gl_RayFlagsNoneEXT, 0xff, 0, 0, 0, camera.position.xyz, 0.001, direction, 1000.0, 0);
+
+    imageStore(outputImage, ivec2(gl_LaunchIDEXT.xy), vec4(payload.color, 1.0));
+}
