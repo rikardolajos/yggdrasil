@@ -206,7 +206,8 @@ int main()
 
     CameraMatrices cameraMatrices = {
         .view = mat4_lookat((vec3){0.0f, 0.0f, 5.0f}, (vec3){0.0f, 0.0f, 0.0f}, (vec3){0.0f, 1.0f, 0.0f}),
-        .proj = mat4_perspective(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 0.01f, 100.0f, 30.0f),
+        .proj = mat4_perspective(gfxSwapchain.extent.width, gfxSwapchain.extent.height, 0.01f, 100.0f,
+                                 30.0f * 3.14159265f / 180.0f),
     };
 
     gfxCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices), 0);
