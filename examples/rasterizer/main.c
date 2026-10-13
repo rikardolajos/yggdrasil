@@ -63,7 +63,6 @@ static void createDevice(VkSurfaceKHR surface)
 {
     const char* deviceExtensions[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
         VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
     };
 
@@ -119,25 +118,6 @@ static void createAttachments(GfxImage* pColorAttachment, GfxImage* pDepthAttach
                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, pDepthAttachment->image,
                     &depthSubresourceRange);
     gfxCmdEnd(cmd);
-}
-
-static void createLayout(GfxLayout* pLayout)
-{
-    VkDescriptorType types[] = {
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-    };
-
-    VkShaderStageFlags stages[] = {
-        VK_SHADER_STAGE_VERTEX_BIT,
-        VK_SHADER_STAGE_VERTEX_BIT,
-        VK_SHADER_STAGE_FRAGMENT_BIT,
-    };
-
-    uint32_t counts[] = {1, 1, 1};
-
-    gfxCreateLayout(GFX_ARRAY_LEN(types), types, stages, counts, 0, NULL, pLayout);
 }
 
 static void createVertexAndIndexBuffers(GfxBuffer* pVertexBuffer, GfxBuffer* pIndexBuffer)
@@ -213,15 +193,12 @@ int main()
     GfxAttachment attachment;
     gfxCreateAttachment(1, &colorAttachment, &depthAttachment, NULL, &attachment);
 
-    GfxLayout layout;
-    createLayout(&layout);
-
-    GfxShader vertexShader;
-    GfxShader fragmentShader;
-    gfxCreateShaderFromFileGLSL("shader.vert", VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, &layout,
-                                &vertexShader);
-    gfxCreateShaderFromFileGLSL("shader.frag", VK_SHADER_STAGE_FRAGMENT_BIT, 0, &layout, &fragmentShader);
-    gfxBuildLinkedShaders(&vertexShader, &fragmentShader);
+    GfxShaderStageDesc shaderStages[] = {
+        {.pPath = "shader.vert"},
+        {.pPath = "shader.frag"},
+    };
+    GfxShader shader;
+    gfxCreateShader(GFX_ARRAY_LEN(shaderStages), shaderStages, &shader);
 
     GfxBuffer cameraBuffer;
     gfxCreateBuffer(sizeof(CameraMatrices), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
@@ -248,11 +225,25 @@ int main()
     GfxBuffer indexBuffer;
     createVertexAndIndexBuffers(&vertexBuffer, &indexBuffer);
 
+    // Attach resources by the names they have in the shader
+    gfxSetShaderBuffer(&shader, "camera", &cameraBuffer);
+    gfxSetShaderBuffer(&shader, "mesh", &modelBuffer);
+    gfxSetShaderTexture(&shader, "diffuseTexture", &texture);
+
+    bool reloadKeyDown = false;
+
     // Seconds since last game loop
     float delta = 0.0f;
     while (!glfwWindowShouldClose(pWindow)) {
         delta = (float)glfwGetTime();
         glfwSetTime(0.0);
+
+        // Reload shaders when F5 is pressed
+        bool reloadKey = glfwGetKey(pWindow, GLFW_KEY_F5) == GLFW_PRESS;
+        if (reloadKey && !reloadKeyDown) {
+            gfxReloadShader(&shader);
+        }
+        reloadKeyDown = reloadKey;
 
         // Wait for shared resources to be available
         gfxWaitForFence();
@@ -285,21 +276,9 @@ int main()
         // Set rendering states. Depth writes are on by default.
         cmdSetRenderingStates(cmd, &attachment);
 
-        // Push descriptor. The buffer infos have to outlive the writes.
-        VkDescriptorBufferInfo bufferInfos[2];
-        VkWriteDescriptorSet writes[] = {
-            gfxGetBufferDescriptor(&cameraBuffer, 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE,
-                                   &bufferInfos[0]),
-            gfxGetBufferDescriptor(&modelBuffer, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0, VK_WHOLE_SIZE,
-                                   &bufferInfos[1]),
-            gfxGetTextureDescriptor(&texture, 2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER),
-        };
-        gfxDevice.fn.vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout.pipelineLayout, 0,
-                                               GFX_ARRAY_LEN(writes), writes);
-
-        // Bind shaders
-        gfxCmdBindShader(cmd, &vertexShader);
-        gfxCmdBindShader(cmd, &fragmentShader);
+        // Bind shader and the resources attached to it
+        gfxCmdBindShader(cmd, &shader);
+        gfxCmdBindResources(cmd, &shader);
 
         // Bind vertex and index buffers
         VkDeviceSize vertexBufferOffset = 0;
@@ -325,10 +304,7 @@ int main()
     gfxDestroyBuffer(&cameraBuffer);
     gfxDestroyBuffer(&modelBuffer);
 
-    gfxDestroyShader(&vertexShader);
-    gfxDestroyShader(&fragmentShader);
-
-    gfxDestroyLayout(&layout);
+    gfxDestroyShader(&shader);
 
     gfxDestroyImage(&colorAttachment);
     gfxDestroyImage(&depthAttachment);

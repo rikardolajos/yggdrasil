@@ -209,7 +209,7 @@ typedef struct GfxDeviceProperties {
 // Device level function pointers for extensions that the Vulkan loader does not
 // export directly. Resolved once by gfxCreateDevice() instead of on every call.
 // Call them through gfxDevice.fn, for instance:
-//     gfxDevice.fn.vkCmdPushDescriptorSetKHR(cmd, ...);
+//     gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_LINE);
 typedef struct GfxDeviceFunctions {
     PFN_vkCreateShadersEXT vkCreateShadersEXT;
     PFN_vkDestroyShaderEXT vkDestroyShaderEXT;
@@ -222,7 +222,6 @@ typedef struct GfxDeviceFunctions {
     PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;
     PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;
-    PFN_vkCmdPushDescriptorSetKHR vkCmdPushDescriptorSetKHR;
 } GfxDeviceFunctions;
 
 // Device contains a Vulkan context for rendering. The GFX device is
@@ -242,6 +241,10 @@ typedef struct GfxDevice {
 #endif
     uint32_t queueFamilyIndex;
     uint32_t apiVersion;
+    VkShaderStageFlags graphicsShaderStages;
+    uint64_t frame;
+    uint64_t completedFrames;
+    uint64_t resourceGeneration;
     bool vsync;
     bool samplerAnisotropy;
 } GfxDevice;
@@ -334,9 +337,8 @@ enum GfxTextureType {
 // If stb_image.h is available and GFX_USE_STB_IMAGE has been defined,
 // textures can be created from files using gfxCreateTextureFromFile(). Mipmaps
 // are automatically generated if specified. A sampler is created with the
-// texture; use the gfxSetTexture*() functions to reconfigure it. The write
-// descriptor for the texture can be
-// retrieved with gfxGetTextureDescriptor(). Release resources with
+// texture; use the gfxSetTexture*() functions to reconfigure it. Attach it to
+// a shader with gfxSetShaderTexture(). Release resources with
 // gfxDestroyTexture().
 typedef struct GfxTexture {
     GfxImage image;
@@ -367,34 +369,122 @@ typedef struct GfxAttachment {
     GfxImage* pResolveAttachment;
 } GfxAttachment;
 
-// Layout abstracts the use of descriptor set layouts and pipeline layouts.
-// Create a new layout with gfxCreateLayout(). Only one descriptor set is
-// supported and it is a push descriptor. Release resources with
-// gfxDestroyLayout().
-typedef struct GfxLayout {
-    VkDescriptorSetLayout setLayout;
-    uint32_t pushConstantRangeCount;
-    VkPushConstantRange* pPushConstantRanges;
-    VkPipelineLayout pipelineLayout;
-} GfxLayout;
+// Describes one stage of a shader. Give either a path or SPIR-V byte code.
+// Paths ending in .spv are loaded as SPIR-V, anything else is compiled as GLSL
+// and may use #include with paths relative to the including file. The stage
+// can be left as 0, in which case it is inferred from the file extension
+// (.vert, .tesc, .tese, .geom, .frag, .comp, .task, .mesh, .rgen, .rint,
+// .rahit, .rchit, .rmiss or .rcall, optionally followed by .glsl) or, for
+// SPIR-V, from the entry point.
+typedef struct GfxShaderStageDesc {
+    const char* pPath;
+    const void* pCode;
+    size_t codeSize;
+    VkShaderStageFlagBits stage;
+    const VkSpecializationInfo* pSpecializationInfo;
+} GfxShaderStageDesc;
 
-// Shader abstracts the handling of shaders and builds ontop of Vulkans shader
-// objects. Create a new shader from SPIR-V code with gfxCreateShader(). To load
-// a shader from GLSL source code, use gfxCreateShaderFromFileGLSL(). Before
-// using the shader, the shader has to be build. Either use gfxBuildShader(), or
-// use gfxBuildLinkedShaders() to build an optimized vertex-fragment shader pair.
-// For rendering, the active shader has to be bound: use gfxCmdBindShader().
-// The shader takes its own copy of the layout's descriptor set layout handle
-// and push constant ranges, but the underlying VkDescriptorSetLayout is still
-// owned by the GfxLayout and must not be destroyed before the shader is built.
-// Release resources with gfxDestroyShader().
-typedef struct GfxShader {
+// One stage of a shader.
+typedef struct GfxShaderStage {
+    VkShaderStageFlagBits stage;
     VkShaderEXT shader;
-    VkShaderCreateInfoEXT createInfo;
-    VkDescriptorSetLayout setLayout;
-    VkPushConstantRange* pPushConstantRanges;
     char* pPath;
-    void* pCode;
+    uint32_t* pCode;
+    size_t codeSize;
+    VkSpecializationInfo* pSpecializationInfo;
+} GfxShaderStage;
+
+// A descriptor binding as reflected from the shader, merged over all stages,
+// together with the resource attached to it. Resources are attached by pointer
+// and resolved when the shader's resources are bound, so the attached objects
+// must stay at the same address for as long as they are attached.
+typedef struct GfxShaderBinding {
+    char* pName;      // Variable name, empty for blocks declared without an instance name
+    char* pBlockName; // Block type name, NULL for resources that are not blocks
+    uint32_t set;
+    uint32_t binding;
+    VkDescriptorType type;
+    uint32_t count; // Number of descriptors, greater than one for arrays
+    VkShaderStageFlags stages;
+    uint32_t infoIndex; // Where the descriptor infos of the binding start
+
+    const GfxBuffer* pBuffer;
+    VkDeviceSize offset;
+    VkDeviceSize range;
+    const GfxTexture* pTextures; // count textures
+    const GfxImage* pImage;
+    VkImageLayout imageLayout;
+
+    bool reported; // Whether a missing resource has been reported
+} GfxShaderBinding;
+
+// A descriptor set retired from use, waiting for the frame that last used it
+// to finish before it can be written again.
+typedef struct GfxRetiredDescriptorSet {
+    VkDescriptorSet set;
+    uint64_t frame;
+} GfxRetiredDescriptorSet;
+
+// One descriptor set of a shader. Bindings and descriptor infos of the set are
+// contiguous ranges in the shader's arrays.
+typedef struct GfxShaderSet {
+    VkDescriptorSetLayout layout;
+    uint32_t firstBinding;
+    uint32_t bindingCount;
+    uint32_t firstInfo;
+    uint32_t infoCount;
+
+    VkDescriptorSet current; // Set holding the descriptors last written
+    uint64_t generation;     // gfxDevice.resourceGeneration when current was written
+    uint32_t retiredCount;
+    uint32_t retiredCapacity;
+    GfxRetiredDescriptorSet* pRetired;
+} GfxShaderSet;
+
+// Shader abstracts the handling of shaders, descriptors and layouts and builds
+// on top of Vulkan's shader objects. Create a new shader from one or more
+// stages with gfxCreateShader(). Graphics stages are linked together. The
+// descriptor set layouts, pipeline layout and push constant range are all
+// reflected from the SPIR-V.
+//
+// Resources are attached by the name they have in the shader, either the
+// variable name or, for blocks declared without an instance name, the block
+// type name. Use gfxSetShaderBuffer(), gfxSetShaderTexture(),
+// gfxSetShaderTextureArray() and gfxSetShaderImage(). Bind the shader with
+// gfxCmdBindShader() and its resources with gfxCmdBindResources(). A
+// descriptor set is only rewritten when what is attached to it changed; a set
+// that a frame in flight may still read is never written, a recycled one is
+// taken instead. Recycling follows the frames presented with gfxPresent().
+//
+// Shaders compiled from GLSL can be recompiled with gfxReloadShader(), which
+// keeps the attached resources. Release resources with gfxDestroyShader().
+typedef struct GfxShader {
+    uint32_t stageCount;
+    GfxShaderStage* pStages;
+    VkShaderStageFlags stages;
+
+    uint32_t setCount;
+    GfxShaderSet* pSets;
+    VkPipelineLayout pipelineLayout;
+    VkPushConstantRange pushConstantRange; // Size is 0 if there are no push constants
+    uint32_t localSize[3];                 // Workgroup size of a compute shader
+
+    uint32_t bindingCount;
+    GfxShaderBinding* pBindings; // Sorted by set and binding
+
+    // Descriptor infos, indexed by GfxShaderBinding::infoIndex. The written
+    // infos are what the current sets hold, the resolved ones are scratch.
+    uint32_t infoCount;
+    VkDescriptorBufferInfo* pWrittenBufferInfos;
+    VkDescriptorImageInfo* pWrittenImageInfos;
+    VkDescriptorBufferInfo* pResolvedBufferInfos;
+    VkDescriptorImageInfo* pResolvedImageInfos;
+    VkWriteDescriptorSet* pWrites; // Scratch, one per binding
+
+    uint32_t poolCount;
+    VkDescriptorPool* pPools;
+    uint32_t poolSizeCount;
+    VkDescriptorPoolSize* pPoolSizes;
 } GfxShader;
 
 
@@ -519,21 +609,6 @@ void gfxDestroyBuffer(GfxBuffer* pBuffer);
 void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset);
 
 /// <summary>
-/// Get the write descriptor of a buffer. The returned write points at
-/// pBufferInfo, which must stay alive until the write has been consumed.
-/// </summary>
-/// <param name="pBuffer">Buffer to use</param>
-/// <param name="binding">In which binding the buffer descriptor should be placed</param>
-/// <param name="type">Type of descriptor</param>
-/// <param name="offset">Offset into buffer to bind</param>
-/// <param name="range">Range in bytes to bind, can be VK_WHOLE_SIZE</param>
-/// <param name="pBufferInfo">Storage for the buffer info that the write refers to</param>
-/// <returns>A write descriptor set</returns>
-VkWriteDescriptorSet gfxGetBufferDescriptor(const GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
-                                            VkDeviceSize offset, VkDeviceSize range,
-                                            VkDescriptorBufferInfo* pBufferInfo);
-
-/// <summary>
 /// Create a new image.
 /// </summary>
 /// <param name="extent">Size of the image. Height and depth must be 1 for 1D, depth must be 1 for 1D and 2D</param>
@@ -597,15 +672,6 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 /// </summary>
 /// <param name="pTexture">Texture to destroy</param>
 void gfxDestroyTexture(GfxTexture* pTexture);
-
-/// <summary>
-/// Get the write descriptor of a texture.
-/// </summary>
-/// <param name="pTexture">Texture to use</param>
-/// <param name="binding">In which binding the texture descriptor should be placed</param>
-/// <param name="type">Type of descriptor</param>
-/// <returns>A write descriptor set</returns>
-VkWriteDescriptorSet gfxGetTextureDescriptor(const GfxTexture* pTexture, uint32_t binding, VkDescriptorType type);
 
 /// <summary>
 /// Set texture magnification filter.
@@ -685,46 +751,16 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentS
 void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet);
 
 /// <summary>
-/// Create a new layout.
+/// Create a new shader from one or more stages. GLSL is compiled to SPIR-V,
+/// and descriptor set layouts, the pipeline layout and the push constant range
+/// are reflected from the SPIR-V. Graphics stages are linked together, a
+/// compute stage must be on its own and ray tracing stages are only compiled
+/// and reflected, to be built into a ray tracing pipeline.
 /// </summary>
-/// <param name="bindingCount">Number of bindings</param>
-/// <param name="pTypes">List of descriptor types, one per binding</param>
-/// <param name="pStages">List of shader stages, one per binding</param>
-/// <param name="pCounts">List of descriptor counts, one per binding</param>
-/// <param name="pushConstantRangeCount">Number of push constant ranges</param>
-/// <param name="pPushConstantRanges">List of push constant ranges</param>
-/// <param name="pLayout">Where the created layout will be stored</param>
-void gfxCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes, VkShaderStageFlags* pStages, uint32_t* pCounts,
-                     uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges, GfxLayout* pLayout);
-
-/// <summary>
-/// Release resources for a layout.
-/// </summary>
-/// <param name="pLayout">Layout to destroy</param>
-void gfxDestroyLayout(GfxLayout* pLayout);
-
-/// <summary>
-/// Create a new shader from SPIR-V byte code.
-/// </summary>
-/// <param name="pCode">Pointer to SPIR-V byte code</param>
-/// <param name="codeSize">Size of code in bytes</param>
-/// <param name="stage">Which stage the shader represents</param>
-/// <param name="nextStage">Which stages can come after this shader</param>
-/// <param name="pLayout">Layout to use</param>
+/// <param name="stageCount">Number of stages</param>
+/// <param name="pStages">List of stage descriptions</param>
 /// <param name="pShader">Where the created shader will be stored</param>
-void gfxCreateShader(const void* pCode, size_t codeSize, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
-                     const GfxLayout* pLayout, GfxShader* pShader);
-
-/// <summary>
-/// Create a new shader from GLSL source code.
-/// </summary>
-/// <param name="pPath">Path to GLSL source code</param>
-/// <param name="stage">Which stage the shader represents</param>
-/// <param name="nextStage">Which stages can come after this shader</param>
-/// <param name="pLayout">Layout to use</param>
-/// <param name="pShader">Where the created shader will be stored</param>
-void gfxCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
-                                 const GfxLayout* pLayout, GfxShader* pShader);
+void gfxCreateShader(uint32_t stageCount, const GfxShaderStageDesc* pStages, GfxShader* pShader);
 
 /// <summary>
 /// Release resources for a shader.
@@ -733,24 +769,102 @@ void gfxCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage,
 void gfxDestroyShader(GfxShader* pShader);
 
 /// <summary>
-/// Build a shader.
+/// Recompile a shader from its source files and rebuild it. Resources attached
+/// to the shader are kept and attached again by name. If anything fails, the
+/// errors are reported and the shader is left as it was. Must not be called
+/// while a command buffer that uses the shader is being recorded.
 /// </summary>
-/// <param name="pShader">Shader to build</param>
-void gfxBuildShader(GfxShader* pShader);
+/// <param name="pShader">Shader to reload</param>
+/// <returns>True if the shader was reloaded</returns>
+bool gfxReloadShader(GfxShader* pShader);
 
 /// <summary>
-/// Build a linked vertex and fragment shader.
+/// Look up a reflected binding by name.
 /// </summary>
-/// <param name="pVertexShader">Vertex shader to build</param>
-/// <param name="pFragmentShader">Fragment shader to build</param>
-void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader);
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name, or block type name for blocks without an instance name</param>
+/// <returns>The binding, or NULL if the shader has no resource with that name</returns>
+const GfxShaderBinding* gfxGetShaderBinding(const GfxShader* pShader, const char* pName);
 
 /// <summary>
-/// Bind a shader for rendering.
+/// Attach a whole buffer to a named uniform or storage buffer in the shader.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name, or block type name for blocks without an instance name</param>
+/// <param name="pBuffer">Buffer to attach, must stay at the same address while attached</param>
+void gfxSetShaderBuffer(GfxShader* pShader, const char* pName, const GfxBuffer* pBuffer);
+
+/// <summary>
+/// Attach a range of a buffer to a named uniform or storage buffer in the
+/// shader.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name, or block type name for blocks without an instance name</param>
+/// <param name="pBuffer">Buffer to attach, must stay at the same address while attached</param>
+/// <param name="offset">Offset into the buffer</param>
+/// <param name="range">Range in bytes, can be VK_WHOLE_SIZE</param>
+void gfxSetShaderBufferRange(GfxShader* pShader, const char* pName, const GfxBuffer* pBuffer, VkDeviceSize offset,
+                             VkDeviceSize range);
+
+/// <summary>
+/// Attach a texture to a named combined image sampler, sampled image or
+/// sampler in the shader.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name</param>
+/// <param name="pTexture">Texture to attach, must stay at the same address while attached</param>
+void gfxSetShaderTexture(GfxShader* pShader, const char* pName, const GfxTexture* pTexture);
+
+/// <summary>
+/// Attach an array of textures to a named array of combined image samplers,
+/// sampled images or samplers in the shader.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name</param>
+/// <param name="textureCount">Number of textures, must match the array size in the shader</param>
+/// <param name="pTextures">Textures to attach, must stay at the same address while attached</param>
+void gfxSetShaderTextureArray(GfxShader* pShader, const char* pName, uint32_t textureCount,
+                              const GfxTexture* pTextures);
+
+/// <summary>
+/// Attach an image to a named storage image, sampled image or input
+/// attachment in the shader. The image must have an image view.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name</param>
+/// <param name="pImage">Image to attach, must stay at the same address while attached</param>
+/// <param name="layout">Layout the image is in when the shader accesses it. VK_IMAGE_LAYOUT_UNDEFINED picks
+/// VK_IMAGE_LAYOUT_GENERAL for storage images and VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL otherwise.</param>
+void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkImageLayout layout);
+
+/// <summary>
+/// Bind a shader. For graphics shaders, the graphics stages that the shader
+/// does not have are bound to null. Ray tracing shaders cannot be bound like
+/// this, they are used through a ray tracing pipeline.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pShader">Shader to bind</param>
 void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader);
+
+/// <summary>
+/// Bind the descriptor sets of a shader with the resources currently attached.
+/// A set is only rewritten if what is attached to it changed since it was last
+/// written. Resources that have nothing attached are reported once.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pShader">Shader whose resources to bind</param>
+void gfxCmdBindResources(VkCommandBuffer cmd, GfxShader* pShader);
+
+/// <summary>
+/// Update push constants of a shader.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pShader">Shader to use</param>
+/// <param name="offset">Offset in bytes into the push constant block</param>
+/// <param name="size">Size of data in bytes</param>
+/// <param name="pData">Data to push</param>
+void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t offset, uint32_t size,
+                         const void* pData);
 
 /// <summary>
 /// Set default states for rendering using shader objects. Viewport, scissor and
@@ -1333,6 +1447,30 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     // are not created with a feature that the device was not created with
     gfxDevice.samplerAnisotropy = features && features->features.samplerAnisotropy;
 
+    // Remember which graphics stages exist on the device, so that shaders can
+    // bind the ones they do not use to null
+    gfxDevice.graphicsShaderStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (features) {
+        if (features->features.tessellationShader) {
+            gfxDevice.graphicsShaderStages |=
+                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+        }
+        if (features->features.geometryShader) {
+            gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_GEOMETRY_BIT;
+        }
+        for (const VkBaseInStructure* p = features->pNext; p; p = p->pNext) {
+            if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT) {
+                const VkPhysicalDeviceMeshShaderFeaturesEXT* pMesh = (const VkPhysicalDeviceMeshShaderFeaturesEXT*)p;
+                if (pMesh->taskShader) {
+                    gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_TASK_BIT_EXT;
+                }
+                if (pMesh->meshShader) {
+                    gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_MESH_BIT_EXT;
+                }
+            }
+        }
+    }
+
     // Resolve extension entry points once, rather than on every call
 #define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetDeviceProcAddr(gfxDevice.device, #name)
     GFX_LOAD_FN(vkCreateShadersEXT);
@@ -1346,7 +1484,6 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_LOAD_FN(vkCmdSetLogicOpEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorBlendEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorWriteMaskEXT);
-    GFX_LOAD_FN(vkCmdPushDescriptorSetKHR);
 #undef GFX_LOAD_FN
 
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
@@ -1703,6 +1840,9 @@ void gfxRecreateSwapchain()
     destroySyncObjects();
     destroySwapchain();
 
+    // The device has been waited on, so every frame recorded before has finished
+    gfxDevice.completedFrames = gfxDevice.frame;
+
     GFX_FREE(gfxSwapchain.supportDetails.formats);
     GFX_FREE(gfxSwapchain.supportDetails.presentModes);
 
@@ -1717,6 +1857,13 @@ void gfxWaitForFence()
 {
     VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex], VK_TRUE,
                              UINT64_MAX));
+
+    // The fence was signaled by the frame that last used this slot, so that
+    // frame and every frame before it have finished
+    if (gfxDevice.frame >= gfxSwapchain.framesInFlight) {
+        gfxDevice.completedFrames =
+            GFX_MAX(gfxDevice.completedFrames, gfxDevice.frame - gfxSwapchain.framesInFlight + 1);
+    }
 }
 
 VkCommandBuffer gfxAcquireNextImage()
@@ -1835,6 +1982,7 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
     }
 
     gfxSwapchain.inFlightIndex = (gfxSwapchain.inFlightIndex + 1) % gfxSwapchain.framesInFlight;
+    gfxDevice.frame++;
 }
 
 void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, GfxBuffer* pBuffer)
@@ -1898,6 +2046,7 @@ void gfxDestroyBuffer(GfxBuffer* pBuffer)
 
     vkDestroyBuffer(gfxDevice.device, pBuffer->buffer, NULL);
     vkFreeMemory(gfxDevice.device, pBuffer->memory, NULL);
+    gfxDevice.resourceGeneration++;
 
     GFX_RESET(pBuffer);
 }
@@ -1931,26 +2080,6 @@ void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDevice
         char* pOffsettedHostMap = (char*)pBuffer->pHostMap + offset;
         memcpy(pOffsettedHostMap, pData, size);
     }
-}
-
-VkWriteDescriptorSet gfxGetBufferDescriptor(const GfxBuffer* pBuffer, uint32_t binding, VkDescriptorType type,
-                                            VkDeviceSize offset, VkDeviceSize range,
-                                            VkDescriptorBufferInfo* pBufferInfo)
-{
-    *pBufferInfo = (VkDescriptorBufferInfo){
-        .buffer = pBuffer->buffer,
-        .offset = offset,
-        .range = range,
-    };
-
-    return (VkWriteDescriptorSet){
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstBinding = binding,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = type,
-        .pBufferInfo = pBufferInfo,
-    };
 }
 
 void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels, VkSampleCountFlagBits samples,
@@ -2011,6 +2140,7 @@ void gfxDestroyImage(GfxImage* pImage)
     vkFreeMemory(gfxDevice.device, pImage->memory, NULL);
     vkDestroyImageView(gfxDevice.device, pImage->imageView, NULL);
     vkDestroyImage(gfxDevice.device, pImage->image, NULL);
+    gfxDevice.resourceGeneration++;
 
     GFX_RESET(pImage);
 }
@@ -2244,6 +2374,7 @@ static void createSampler(GfxTexture* pTexture)
         /* Delete old sampler first */
         vkDeviceWaitIdle(gfxDevice.device);
         vkDestroySampler(gfxDevice.device, pTexture->sampler, NULL);
+        gfxDevice.resourceGeneration++;
     } else {
         /* First time, use defaults */
         pTexture->magFilter = VK_FILTER_LINEAR;
@@ -2323,21 +2454,9 @@ void gfxDestroyTexture(GfxTexture* pTexture)
 {
     vkDeviceWaitIdle(gfxDevice.device);
     vkDestroySampler(gfxDevice.device, pTexture->sampler, NULL);
-    gfxDestroyImage(&pTexture->image);
+    gfxDestroyImage(&pTexture->image); // Also advances the resource generation
 
     GFX_RESET(pTexture);
-}
-
-VkWriteDescriptorSet gfxGetTextureDescriptor(const GfxTexture* pTexture, uint32_t binding, VkDescriptorType type)
-{
-    return (VkWriteDescriptorSet){
-        .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstBinding = binding,
-        .dstArrayElement = 0,
-        .descriptorCount = 1,
-        .descriptorType = type,
-        .pImageInfo = &pTexture->imageInfo,
-    };
 }
 
 void gfxSetTextureMagFilter(GfxTexture* pTexture, VkFilter magFilter)
@@ -2468,320 +2587,1830 @@ void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet
     vkCmdEndRendering(cmd);
 }
 
-void gfxCreateLayout(uint32_t bindingCount, VkDescriptorType* pTypes, VkShaderStageFlags* pStages, uint32_t* pCounts,
-                     uint32_t pushConstantRangeCount, VkPushConstantRange* pPushConstantRanges, GfxLayout* pLayout)
+// Report a failure as an error, or as a warning when the caller can recover
+// from it, as when a shader is reloaded
+#define GFX_FAIL(fatal, fmt, ...)                                                                                      \
+    do {                                                                                                               \
+        if (fatal) {                                                                                                   \
+            GFX_ERROR(fmt, ##__VA_ARGS__);                                                                             \
+        } else {                                                                                                       \
+            GFX_WARNING(fmt, ##__VA_ARGS__);                                                                           \
+        }                                                                                                              \
+    } while (0)
+
+// Stages that are built into a ray tracing pipeline rather than shader objects
+#define GFX_RAY_TRACING_STAGES                                                                                         \
+    (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |          \
+     VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR)
+
+// How many generations of every descriptor set a descriptor pool holds
+#define GFX_DESCRIPTOR_SETS_PER_POOL 8
+
+static void* allocZeroed(size_t count, size_t size)
 {
-    if (!gfxDevice.device) {
-        GFX_ERROR("Device not initialized");
-    }
-
-    size_t pushConstantRangeSize = pushConstantRangeCount * sizeof(VkPushConstantRange);
-
-    *pLayout = (GfxLayout){
-        .pushConstantRangeCount = pushConstantRangeCount,
-    };
-
-    if (pLayout->pushConstantRangeCount) {
-        pLayout->pPushConstantRanges = GFX_MALLOC(pushConstantRangeSize);
-        memcpy(pLayout->pPushConstantRanges, pPushConstantRanges, pushConstantRangeSize);
-    }
-
-    VkDescriptorSetLayoutBinding* pBindings = GFX_MALLOC(bindingCount * sizeof *pBindings);
-
-    for (uint32_t i = 0; i < bindingCount; i++) {
-        pBindings[i] = (VkDescriptorSetLayoutBinding){
-            .binding = i,
-            .descriptorType = pTypes[i],
-            .descriptorCount = pCounts[i],
-            .stageFlags = pStages[i],
-        };
-    }
-
-    VkDescriptorSetLayoutCreateInfo setLayoutCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT,
-        .bindingCount = bindingCount,
-        .pBindings = pBindings,
-    };
-
-    VK_CHECK(vkCreateDescriptorSetLayout(gfxDevice.device, &setLayoutCreateInfo, NULL, &pLayout->setLayout));
-
-    VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 1,
-        .pSetLayouts = &pLayout->setLayout,
-        .pushConstantRangeCount = pLayout->pushConstantRangeCount,
-        .pPushConstantRanges = pLayout->pPushConstantRanges,
-    };
-    VK_CHECK(vkCreatePipelineLayout(gfxDevice.device, &pipelineLayoutCreateInfo, NULL, &pLayout->pipelineLayout));
-
-    GFX_FREE(pBindings);
+    void* p = GFX_MALLOC(count * size);
+    memset(p, 0, count * size);
+    return p;
 }
 
-void gfxDestroyLayout(GfxLayout* pLayout)
+static char* copyString(const char* pString, size_t maxLength)
 {
-    vkDeviceWaitIdle(gfxDevice.device);
-
-    vkDestroyPipelineLayout(gfxDevice.device, pLayout->pipelineLayout, NULL);
-    vkDestroyDescriptorSetLayout(gfxDevice.device, pLayout->setLayout, NULL);
-
-    if (pLayout->pPushConstantRanges) {
-        GFX_FREE(pLayout->pPushConstantRanges);
+    size_t length = 0;
+    while (length < maxLength && pString[length]) {
+        length++;
     }
-
-    GFX_RESET(pLayout);
+    char* pCopy = GFX_MALLOC(length + 1);
+    memcpy(pCopy, pString, length);
+    pCopy[length] = 0;
+    return pCopy;
 }
 
-static void createShader(GfxShader* pShader, const void* pCode, size_t codeSize, VkShaderStageFlagBits stage,
-                         VkShaderStageFlags nextStage, const GfxLayout* pLayout)
+static bool endsWith(const char* pString, size_t length, const char* pSuffix)
 {
-    if (!gfxDevice.device) {
-        GFX_ERROR("Device not initialized");
-    }
-
-    pShader->pCode = GFX_MALLOC(codeSize);
-    memcpy(pShader->pCode, pCode, codeSize);
-
-    // Take our own copies, so that createInfo does not point into the layout
-    // until the shader is built
-    pShader->setLayout = pLayout->setLayout;
-    if (pLayout->pushConstantRangeCount) {
-        size_t pushConstantRangeSize = pLayout->pushConstantRangeCount * sizeof *pShader->pPushConstantRanges;
-        pShader->pPushConstantRanges = GFX_MALLOC(pushConstantRangeSize);
-        memcpy(pShader->pPushConstantRanges, pLayout->pPushConstantRanges, pushConstantRangeSize);
-    }
-
-    pShader->createInfo = (VkShaderCreateInfoEXT){
-        .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
-        .flags = 0,
-        .stage = stage,
-        .nextStage = nextStage,
-        .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
-        .codeSize = codeSize,
-        .pCode = pShader->pCode,
-        .pName = "main",
-        .setLayoutCount = 1,
-        .pSetLayouts = &pShader->setLayout,
-        .pushConstantRangeCount = pLayout->pushConstantRangeCount,
-        .pPushConstantRanges = pShader->pPushConstantRanges,
-        .pSpecializationInfo = NULL,
-    };
+    size_t suffixLength = strlen(pSuffix);
+    return length >= suffixLength && !memcmp(pString + length - suffixLength, pSuffix, suffixLength);
 }
 
-void gfxCreateShader(const void* pCode, size_t codeSize, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
-                     const GfxLayout* pLayout, GfxShader* pShader)
+// Read a whole file into memory. The contents are null terminated, which the
+// size does not include. Returns NULL if the file cannot be read.
+static char* readFile(const char* pPath, size_t* pSize)
 {
-    GFX_RESET(pShader);
-
-    createShader(pShader, pCode, codeSize, stage, nextStage, pLayout);
-}
-
-void gfxCreateShaderFromFileGLSL(const char* pPath, VkShaderStageFlagBits stage, VkShaderStageFlags nextStage,
-                                 const GfxLayout* pLayout, GfxShader* pShader)
-{
-    size_t sz = strlen(pPath) + 1;
-
-    *pShader = (GfxShader){
-        .pPath = GFX_MALLOC(sz),
-    };
-
-    memcpy(pShader->pPath, pPath, sz);
-
-    // Read file
-    FILE* file = fopen(pShader->pPath, "rb");
+    FILE* file = fopen(pPath, "rb");
     if (!file) {
-        GFX_ERROR("Unable to open %s\n", pShader->pPath);
+        return NULL;
     }
 
-    long file_size;
     fseek(file, 0, SEEK_END);
-    file_size = ftell(file);
+    long size = ftell(file);
     rewind(file);
 
-    char* pShaderSource = GFX_MALLOC(file_size + 1);
-    fread(pShaderSource, 1, file_size, file);
-    pShaderSource[file_size] = 0;
-
-    fclose(file);
-
-    // Compile GLSL to SPIR-V
-    glslang_target_client_version_t glslangVersion = GLSLANG_TARGET_VULKAN_1_0;
-    switch (VK_VERSION_MAJOR(gfxDevice.apiVersion)) {
-    case 1:
-        switch (VK_VERSION_MINOR(gfxDevice.apiVersion)) {
-        case 0:
-            glslangVersion = GLSLANG_TARGET_VULKAN_1_0;
-            break;
-        case 1:
-            glslangVersion = GLSLANG_TARGET_VULKAN_1_1;
-            break;
-        case 2:
-            glslangVersion = GLSLANG_TARGET_VULKAN_1_2;
-            break;
-        case 3:
-            glslangVersion = GLSLANG_TARGET_VULKAN_1_3;
-            break;
-        case 4:
-            glslangVersion = GLSLANG_TARGET_VULKAN_1_4;
-            break;
-        }
-        break;
+    if (size < 0) {
+        fclose(file);
+        return NULL;
     }
 
-    glslang_stage_t glslangStage = GLSLANG_STAGE_VERTEX;
+    char* pData = GFX_MALLOC((size_t)size + 1);
+    size_t read = fread(pData, 1, (size_t)size, file);
+    fclose(file);
+
+    if (read != (size_t)size) {
+        GFX_FREE(pData);
+        return NULL;
+    }
+
+    pData[size] = 0;
+    if (pSize) {
+        *pSize = (size_t)size;
+    }
+    return pData;
+}
+
+
+// SPIR-V reflection //
+
+// The subset of the SPIR-V specification that the reflection needs
+enum {
+    GFX_SPV_MAGIC = 0x07230203,
+
+    GFX_SPV_OP_NAME = 5,
+    GFX_SPV_OP_ENTRY_POINT = 15,
+    GFX_SPV_OP_EXECUTION_MODE = 16,
+    GFX_SPV_OP_TYPE_BOOL = 20,
+    GFX_SPV_OP_TYPE_INT = 21,
+    GFX_SPV_OP_TYPE_FLOAT = 22,
+    GFX_SPV_OP_TYPE_VECTOR = 23,
+    GFX_SPV_OP_TYPE_MATRIX = 24,
+    GFX_SPV_OP_TYPE_IMAGE = 25,
+    GFX_SPV_OP_TYPE_SAMPLER = 26,
+    GFX_SPV_OP_TYPE_SAMPLED_IMAGE = 27,
+    GFX_SPV_OP_TYPE_ARRAY = 28,
+    GFX_SPV_OP_TYPE_RUNTIME_ARRAY = 29,
+    GFX_SPV_OP_TYPE_STRUCT = 30,
+    GFX_SPV_OP_TYPE_POINTER = 32,
+    GFX_SPV_OP_CONSTANT = 43,
+    GFX_SPV_OP_SPEC_CONSTANT = 50,
+    GFX_SPV_OP_VARIABLE = 59,
+    GFX_SPV_OP_DECORATE = 71,
+    GFX_SPV_OP_MEMBER_DECORATE = 72,
+    GFX_SPV_OP_EXECUTION_MODE_ID = 331,
+    GFX_SPV_OP_TYPE_ACCELERATION_STRUCTURE = 5341,
+
+    GFX_SPV_DECORATION_SPEC_ID = 1,
+    GFX_SPV_DECORATION_BLOCK = 2,
+    GFX_SPV_DECORATION_BUFFER_BLOCK = 3,
+    GFX_SPV_DECORATION_ARRAY_STRIDE = 6,
+    GFX_SPV_DECORATION_MATRIX_STRIDE = 7,
+    GFX_SPV_DECORATION_BINDING = 33,
+    GFX_SPV_DECORATION_DESCRIPTOR_SET = 34,
+    GFX_SPV_DECORATION_OFFSET = 35,
+
+    GFX_SPV_STORAGE_UNIFORM_CONSTANT = 0,
+    GFX_SPV_STORAGE_UNIFORM = 2,
+    GFX_SPV_STORAGE_PUSH_CONSTANT = 9,
+    GFX_SPV_STORAGE_STORAGE_BUFFER = 12,
+
+    GFX_SPV_DIM_BUFFER = 5,
+    GFX_SPV_DIM_SUBPASS_DATA = 6,
+
+    GFX_SPV_EXECUTION_MODE_LOCAL_SIZE = 17,
+    GFX_SPV_EXECUTION_MODE_LOCAL_SIZE_ID = 38,
+};
+
+// Flags for decorations found on an id
+enum {
+    GFX_SPV_HAS_SET = 1 << 0,
+    GFX_SPV_HAS_BINDING = 1 << 1,
+    GFX_SPV_HAS_SPEC_ID = 1 << 2,
+    GFX_SPV_IS_BLOCK = 1 << 3,
+    GFX_SPV_IS_BUFFER_BLOCK = 1 << 4,
+};
+
+// What the reflection knows about one id of a SPIR-V module
+typedef struct GfxSpvId {
+    const uint32_t* pInstruction; // Instruction defining the id, for types, constants and variables
+    const char* pName;            // Points into the module, not necessarily null terminated
+    uint32_t nameMaxLength;
+    uint32_t set;
+    uint32_t binding;
+    uint32_t specId;
+    uint32_t arrayStride;
+    uint32_t flags;
+} GfxSpvId;
+
+typedef struct GfxSpvModule {
+    const uint32_t* pCode;
+    uint32_t wordCount;
+    uint32_t idBound;
+    GfxSpvId* pIds;
+    const VkSpecializationInfo* pSpecializationInfo;
+} GfxSpvModule;
+
+static const struct GfxSpvExecutionModel {
+    uint32_t model;
+    VkShaderStageFlagBits stage;
+} gfxSpvExecutionModels[] = {
+    {0, VK_SHADER_STAGE_VERTEX_BIT},
+    {1, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT},
+    {2, VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT},
+    {3, VK_SHADER_STAGE_GEOMETRY_BIT},
+    {4, VK_SHADER_STAGE_FRAGMENT_BIT},
+    {5, VK_SHADER_STAGE_COMPUTE_BIT},
+    {5313, VK_SHADER_STAGE_RAYGEN_BIT_KHR},
+    {5314, VK_SHADER_STAGE_INTERSECTION_BIT_KHR},
+    {5315, VK_SHADER_STAGE_ANY_HIT_BIT_KHR},
+    {5316, VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR},
+    {5317, VK_SHADER_STAGE_MISS_BIT_KHR},
+    {5318, VK_SHADER_STAGE_CALLABLE_BIT_KHR},
+    {5364, VK_SHADER_STAGE_TASK_BIT_EXT},
+    {5365, VK_SHADER_STAGE_MESH_BIT_EXT},
+};
+
+static uint32_t spvOpcode(const uint32_t* pInstruction)
+{
+    return pInstruction[0] & 0xffff;
+}
+
+static uint32_t spvWordCount(const uint32_t* pInstruction)
+{
+    return pInstruction[0] >> 16;
+}
+
+static bool spvIsValid(const uint32_t* pCode, size_t codeSize)
+{
+    return pCode && codeSize >= 5 * sizeof(uint32_t) && codeSize % sizeof(uint32_t) == 0 && pCode[0] == GFX_SPV_MAGIC;
+}
+
+// Index the ids of a module. Only the instructions the reflection needs are
+// looked at, everything else is skipped.
+static bool spvParse(GfxSpvModule* pModule, const uint32_t* pCode, size_t codeSize,
+                     const VkSpecializationInfo* pSpecializationInfo)
+{
+    *pModule = (GfxSpvModule){0};
+
+    if (!spvIsValid(pCode, codeSize)) {
+        return false;
+    }
+
+    pModule->pCode = pCode;
+    pModule->wordCount = (uint32_t)(codeSize / sizeof(uint32_t));
+    pModule->idBound = pCode[3];
+    pModule->pIds = allocZeroed(pModule->idBound, sizeof *pModule->pIds);
+    pModule->pSpecializationInfo = pSpecializationInfo;
+
+    for (uint32_t i = 5; i < pModule->wordCount;) {
+        const uint32_t* in = &pCode[i];
+        uint32_t n = spvWordCount(in);
+        if (n == 0 || i + n > pModule->wordCount) {
+            GFX_FREE(pModule->pIds);
+            pModule->pIds = NULL;
+            return false;
+        }
+
+        uint32_t resultId = 0;
+        switch (spvOpcode(in)) {
+        case GFX_SPV_OP_NAME:
+            if (n >= 3 && in[1] < pModule->idBound) {
+                pModule->pIds[in[1]].pName = (const char*)&in[2];
+                pModule->pIds[in[1]].nameMaxLength = (n - 2) * sizeof(uint32_t);
+            }
+            break;
+
+        case GFX_SPV_OP_DECORATE:
+            if (n >= 3 && in[1] < pModule->idBound) {
+                GfxSpvId* pId = &pModule->pIds[in[1]];
+                uint32_t value = n >= 4 ? in[3] : 0;
+                switch (in[2]) {
+                case GFX_SPV_DECORATION_DESCRIPTOR_SET:
+                    pId->set = value;
+                    pId->flags |= GFX_SPV_HAS_SET;
+                    break;
+                case GFX_SPV_DECORATION_BINDING:
+                    pId->binding = value;
+                    pId->flags |= GFX_SPV_HAS_BINDING;
+                    break;
+                case GFX_SPV_DECORATION_SPEC_ID:
+                    pId->specId = value;
+                    pId->flags |= GFX_SPV_HAS_SPEC_ID;
+                    break;
+                case GFX_SPV_DECORATION_ARRAY_STRIDE:
+                    pId->arrayStride = value;
+                    break;
+                case GFX_SPV_DECORATION_BLOCK:
+                    pId->flags |= GFX_SPV_IS_BLOCK;
+                    break;
+                case GFX_SPV_DECORATION_BUFFER_BLOCK:
+                    pId->flags |= GFX_SPV_IS_BUFFER_BLOCK;
+                    break;
+                }
+            }
+            break;
+
+        // Types have their result id first
+        case GFX_SPV_OP_TYPE_BOOL:
+        case GFX_SPV_OP_TYPE_INT:
+        case GFX_SPV_OP_TYPE_FLOAT:
+        case GFX_SPV_OP_TYPE_VECTOR:
+        case GFX_SPV_OP_TYPE_MATRIX:
+        case GFX_SPV_OP_TYPE_IMAGE:
+        case GFX_SPV_OP_TYPE_SAMPLER:
+        case GFX_SPV_OP_TYPE_SAMPLED_IMAGE:
+        case GFX_SPV_OP_TYPE_ARRAY:
+        case GFX_SPV_OP_TYPE_RUNTIME_ARRAY:
+        case GFX_SPV_OP_TYPE_STRUCT:
+        case GFX_SPV_OP_TYPE_POINTER:
+        case GFX_SPV_OP_TYPE_ACCELERATION_STRUCTURE:
+            resultId = n >= 2 ? in[1] : 0;
+            break;
+
+        // Constants and variables have their result type first
+        case GFX_SPV_OP_CONSTANT:
+        case GFX_SPV_OP_SPEC_CONSTANT:
+        case GFX_SPV_OP_VARIABLE:
+            resultId = n >= 3 ? in[2] : 0;
+            break;
+        }
+
+        if (resultId && resultId < pModule->idBound) {
+            pModule->pIds[resultId].pInstruction = in;
+        }
+
+        i += n;
+    }
+
+    return true;
+}
+
+static const uint32_t* spvInstruction(const GfxSpvModule* pModule, uint32_t id)
+{
+    return id < pModule->idBound ? pModule->pIds[id].pInstruction : NULL;
+}
+
+// Get the name of an id as a new string, empty if it has none
+static char* spvName(const GfxSpvModule* pModule, uint32_t id)
+{
+    const GfxSpvId* pId = &pModule->pIds[id];
+    return pId->pName ? copyString(pId->pName, pId->nameMaxLength) : copyString("", 0);
+}
+
+// Get the value of an integer constant. Specialization constants take their
+// value from the specialization info if it sets them.
+static bool spvConstant(const GfxSpvModule* pModule, uint32_t id, uint32_t* pValue)
+{
+    const uint32_t* in = spvInstruction(pModule, id);
+    if (!in || spvWordCount(in) < 4 ||
+        (spvOpcode(in) != GFX_SPV_OP_CONSTANT && spvOpcode(in) != GFX_SPV_OP_SPEC_CONSTANT)) {
+        return false;
+    }
+
+    *pValue = in[3];
+
+    const GfxSpvId* pId = &pModule->pIds[id];
+    const VkSpecializationInfo* pInfo = pModule->pSpecializationInfo;
+    if (spvOpcode(in) == GFX_SPV_OP_SPEC_CONSTANT && (pId->flags & GFX_SPV_HAS_SPEC_ID) && pInfo) {
+        for (uint32_t i = 0; i < pInfo->mapEntryCount; i++) {
+            const VkSpecializationMapEntry* pEntry = &pInfo->pMapEntries[i];
+            if (pEntry->constantID == pId->specId) {
+                uint32_t value = 0;
+                memcpy(&value, (const char*)pInfo->pData + pEntry->offset, GFX_MIN(pEntry->size, sizeof value));
+                *pValue = value;
+                break;
+            }
+        }
+    }
+
+    return true;
+}
+
+static bool spvMemberDecoration(const GfxSpvModule* pModule, uint32_t structId, uint32_t member, uint32_t decoration,
+                                uint32_t* pValue)
+{
+    // Already validated by spvParse()
+    for (uint32_t i = 5; i < pModule->wordCount; i += spvWordCount(&pModule->pCode[i])) {
+        const uint32_t* in = &pModule->pCode[i];
+        if (spvOpcode(in) == GFX_SPV_OP_MEMBER_DECORATE && spvWordCount(in) >= 5 && in[1] == structId &&
+            in[2] == member && in[3] == decoration) {
+            *pValue = in[4];
+            return true;
+        }
+    }
+    return false;
+}
+
+// Size in bytes of a type in an explicitly laid out block, such as a push
+// constant block. Structs end at their last member, without trailing padding.
+static uint32_t spvTypeSize(const GfxSpvModule* pModule, uint32_t typeId, uint32_t matrixStride, uint32_t depth)
+{
+    const uint32_t* in = spvInstruction(pModule, typeId);
+    if (!in || depth > 32) {
+        return 0;
+    }
+
+    switch (spvOpcode(in)) {
+    case GFX_SPV_OP_TYPE_BOOL:
+        return 4;
+    case GFX_SPV_OP_TYPE_INT:
+    case GFX_SPV_OP_TYPE_FLOAT:
+        return in[2] / 8;
+    case GFX_SPV_OP_TYPE_VECTOR:
+        return in[3] * spvTypeSize(pModule, in[2], 0, depth + 1);
+    case GFX_SPV_OP_TYPE_MATRIX:
+        return in[3] * (matrixStride ? matrixStride : spvTypeSize(pModule, in[2], 0, depth + 1));
+    case GFX_SPV_OP_TYPE_ARRAY: {
+        uint32_t length = 0;
+        spvConstant(pModule, in[3], &length);
+        uint32_t stride = pModule->pIds[typeId].arrayStride;
+        return length * (stride ? stride : spvTypeSize(pModule, in[2], matrixStride, depth + 1));
+    }
+    case GFX_SPV_OP_TYPE_STRUCT: {
+        uint32_t size = 0;
+        for (uint32_t member = 0; member + 2 < spvWordCount(in); member++) {
+            uint32_t offset = 0;
+            uint32_t memberMatrixStride = 0;
+            spvMemberDecoration(pModule, typeId, member, GFX_SPV_DECORATION_OFFSET, &offset);
+            spvMemberDecoration(pModule, typeId, member, GFX_SPV_DECORATION_MATRIX_STRIDE, &memberMatrixStride);
+            size = GFX_MAX(size, offset + spvTypeSize(pModule, in[2 + member], memberMatrixStride, depth + 1));
+        }
+        return size;
+    }
+    case GFX_SPV_OP_TYPE_POINTER:
+        // Physical storage buffer pointers, from buffer device addresses
+        return 8;
+    }
+
+    return 0;
+}
+
+static bool spvDescriptorType(const GfxSpvModule* pModule, uint32_t typeId, uint32_t storageClass,
+                              VkDescriptorType* pType)
+{
+    const uint32_t* in = spvInstruction(pModule, typeId);
+    if (!in) {
+        return false;
+    }
+
+    switch (spvOpcode(in)) {
+    case GFX_SPV_OP_TYPE_STRUCT:
+        if (storageClass == GFX_SPV_STORAGE_STORAGE_BUFFER ||
+            (storageClass == GFX_SPV_STORAGE_UNIFORM && (pModule->pIds[typeId].flags & GFX_SPV_IS_BUFFER_BLOCK))) {
+            *pType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            return true;
+        }
+        if (storageClass == GFX_SPV_STORAGE_UNIFORM) {
+            *pType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            return true;
+        }
+        return false;
+
+    case GFX_SPV_OP_TYPE_SAMPLED_IMAGE: {
+        const uint32_t* pImage = spvInstruction(pModule, in[2]);
+        bool isBuffer = pImage && pImage[3] == GFX_SPV_DIM_BUFFER;
+        *pType = isBuffer ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        return true;
+    }
+
+    case GFX_SPV_OP_TYPE_IMAGE: {
+        uint32_t dim = in[3];
+        bool isStorage = in[7] == 2;
+        if (dim == GFX_SPV_DIM_SUBPASS_DATA) {
+            *pType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+        } else if (dim == GFX_SPV_DIM_BUFFER) {
+            *pType = isStorage ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        } else {
+            *pType = isStorage ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        }
+        return true;
+    }
+
+    case GFX_SPV_OP_TYPE_SAMPLER:
+        *pType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        return true;
+
+    case GFX_SPV_OP_TYPE_ACCELERATION_STRUCTURE:
+        *pType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+        return true;
+    }
+
+    return false;
+}
+
+// Stage of the first entry point in a module, 0 if it has none
+static VkShaderStageFlagBits spvEntryPointStage(const uint32_t* pCode, size_t codeSize)
+{
+    uint32_t wordCount = (uint32_t)(codeSize / sizeof(uint32_t));
+    for (uint32_t i = 5; i < wordCount && spvWordCount(&pCode[i]); i += spvWordCount(&pCode[i])) {
+        if (spvOpcode(&pCode[i]) == GFX_SPV_OP_ENTRY_POINT && i + 1 < wordCount) {
+            for (uint32_t j = 0; j < GFX_ARRAY_LEN(gfxSpvExecutionModels); j++) {
+                if (gfxSpvExecutionModels[j].model == pCode[i + 1]) {
+                    return gfxSpvExecutionModels[j].stage;
+                }
+            }
+            return 0;
+        }
+    }
+    return 0;
+}
+
+
+// Shaders //
+
+static const char* descriptorTypeName(VkDescriptorType type)
+{
+    switch (type) {
+    case VK_DESCRIPTOR_TYPE_SAMPLER:
+        return "sampler";
+    case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
+        return "combined image sampler";
+    case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        return "sampled image";
+    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        return "storage image";
+    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+        return "uniform texel buffer";
+    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+        return "storage texel buffer";
+    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+        return "uniform buffer";
+    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+        return "storage buffer";
+    case VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT:
+        return "input attachment";
+    case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
+        return "acceleration structure";
+    default:
+        return "descriptor";
+    }
+}
+
+static bool isBufferDescriptor(VkDescriptorType type)
+{
+    return type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+}
+
+static bool isImageDescriptor(VkDescriptorType type)
+{
+    return type == VK_DESCRIPTOR_TYPE_SAMPLER || type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+           type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE || type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+           type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+}
+
+// Name used for a binding in messages
+static const char* bindingName(const GfxShaderBinding* pBinding)
+{
+    if (pBinding->pName[0]) {
+        return pBinding->pName;
+    }
+    return pBinding->pBlockName ? pBinding->pBlockName : "(unnamed)";
+}
+
+// Name used for a shader in messages
+static const char* shaderName(const GfxShader* pShader)
+{
+    return pShader->stageCount && pShader->pStages[0].pPath ? pShader->pStages[0].pPath : "(SPIR-V)";
+}
+
+static const struct GfxStageExtension {
+    const char* pExtension;
+    VkShaderStageFlagBits stage;
+} gfxStageExtensions[] = {
+    {".vert", VK_SHADER_STAGE_VERTEX_BIT},
+    {".tesc", VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT},
+    {".tese", VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT},
+    {".geom", VK_SHADER_STAGE_GEOMETRY_BIT},
+    {".frag", VK_SHADER_STAGE_FRAGMENT_BIT},
+    {".comp", VK_SHADER_STAGE_COMPUTE_BIT},
+    {".task", VK_SHADER_STAGE_TASK_BIT_EXT},
+    {".mesh", VK_SHADER_STAGE_MESH_BIT_EXT},
+    {".rgen", VK_SHADER_STAGE_RAYGEN_BIT_KHR},
+    {".rint", VK_SHADER_STAGE_INTERSECTION_BIT_KHR},
+    {".rahit", VK_SHADER_STAGE_ANY_HIT_BIT_KHR},
+    {".rchit", VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR},
+    {".rmiss", VK_SHADER_STAGE_MISS_BIT_KHR},
+    {".rcall", VK_SHADER_STAGE_CALLABLE_BIT_KHR},
+};
+
+static VkShaderStageFlagBits stageFromPath(const char* pPath)
+{
+    size_t length = strlen(pPath);
+
+    // Allow a trailing .glsl, as in shader.frag.glsl
+    if (endsWith(pPath, length, ".glsl")) {
+        length -= strlen(".glsl");
+    }
+
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(gfxStageExtensions); i++) {
+        if (endsWith(pPath, length, gfxStageExtensions[i].pExtension)) {
+            return gfxStageExtensions[i].stage;
+        }
+    }
+
+    return 0;
+}
+
+static glslang_stage_t glslangStage(VkShaderStageFlagBits stage)
+{
     switch (stage) {
-    case VK_SHADER_STAGE_VERTEX_BIT:
-        glslangStage = GLSLANG_STAGE_VERTEX;
-        break;
     case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
-        glslangStage = GLSLANG_STAGE_TESSCONTROL;
-        break;
+        return GLSLANG_STAGE_TESSCONTROL;
     case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
-        glslangStage = GLSLANG_STAGE_TESSEVALUATION;
-        break;
+        return GLSLANG_STAGE_TESSEVALUATION;
     case VK_SHADER_STAGE_GEOMETRY_BIT:
-        glslangStage = GLSLANG_STAGE_GEOMETRY;
-        break;
+        return GLSLANG_STAGE_GEOMETRY;
     case VK_SHADER_STAGE_FRAGMENT_BIT:
-        glslangStage = GLSLANG_STAGE_FRAGMENT;
-        break;
+        return GLSLANG_STAGE_FRAGMENT;
     case VK_SHADER_STAGE_COMPUTE_BIT:
-        glslangStage = GLSLANG_STAGE_COMPUTE;
-        break;
+        return GLSLANG_STAGE_COMPUTE;
     case VK_SHADER_STAGE_RAYGEN_BIT_KHR:
-        glslangStage = GLSLANG_STAGE_RAYGEN;
-        break;
+        return GLSLANG_STAGE_RAYGEN;
     case VK_SHADER_STAGE_INTERSECTION_BIT_KHR:
-        glslangStage = GLSLANG_STAGE_INTERSECT;
-        break;
-    case VK_SHADER_STAGE_ANY_HIT_BIT_NV:
-        glslangStage = GLSLANG_STAGE_ANYHIT;
-        break;
+        return GLSLANG_STAGE_INTERSECT;
+    case VK_SHADER_STAGE_ANY_HIT_BIT_KHR:
+        return GLSLANG_STAGE_ANYHIT;
     case VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:
-        glslangStage = GLSLANG_STAGE_CLOSESTHIT;
-        break;
+        return GLSLANG_STAGE_CLOSESTHIT;
     case VK_SHADER_STAGE_MISS_BIT_KHR:
-        glslangStage = GLSLANG_STAGE_MISS;
-        break;
+        return GLSLANG_STAGE_MISS;
     case VK_SHADER_STAGE_CALLABLE_BIT_KHR:
-        glslangStage = GLSLANG_STAGE_CALLABLE;
-        break;
+        return GLSLANG_STAGE_CALLABLE;
     case VK_SHADER_STAGE_TASK_BIT_EXT:
-        glslangStage = GLSLANG_STAGE_TASK;
-        break;
+        return GLSLANG_STAGE_TASK;
     case VK_SHADER_STAGE_MESH_BIT_EXT:
-        glslangStage = GLSLANG_STAGE_MESH;
-        break;
+        return GLSLANG_STAGE_MESH;
+    default:
+        return GLSLANG_STAGE_VERTEX;
+    }
+}
+
+// Resolve #include relative to the including file. glslang knows the top
+// level file by no name, so it is passed as the context, and nested includes
+// are known by the path returned here.
+static glsl_include_result_t* includeFile(void* ctx, const char* pHeaderName, const char* pIncluderName,
+                                          size_t includeDepth)
+{
+    GFX_UNUSED(includeDepth);
+
+    const char* pIncluder = pIncluderName && pIncluderName[0] ? pIncluderName : (const char*)ctx;
+
+    size_t directoryLength = 0;
+    for (const char* c = pIncluder; *c; c++) {
+        if (*c == '/' || *c == '\\') {
+            directoryLength = (size_t)(c - pIncluder) + 1;
+        }
+    }
+
+    size_t headerLength = strlen(pHeaderName);
+    char* pPath = GFX_MALLOC(directoryLength + headerLength + 1);
+    memcpy(pPath, pIncluder, directoryLength);
+    memcpy(pPath + directoryLength, pHeaderName, headerLength + 1);
+
+    size_t size = 0;
+    char* pData = readFile(pPath, &size);
+    if (!pData) {
+        // A missing header name makes glslang report the failed include
+        GFX_FREE(pPath);
+        pPath = NULL;
+    }
+
+    glsl_include_result_t* pResult = GFX_MALLOC(sizeof *pResult);
+    *pResult = (glsl_include_result_t){
+        .header_name = pPath,
+        .header_data = pData,
+        .header_length = size,
+    };
+    return pResult;
+}
+
+static int freeIncludeResult(void* ctx, glsl_include_result_t* pResult)
+{
+    GFX_UNUSED(ctx);
+    GFX_FREE((void*)pResult->header_name);
+    GFX_FREE((void*)pResult->header_data);
+    GFX_FREE(pResult);
+    return 0;
+}
+
+// Enable #include in a GLSL source, without every shader having to enable the
+// extension. The extension has to come after #version, so it is inserted on
+// the line after it, followed by a #line directive that keeps the line numbers
+// in messages matching the file. Takes ownership of the source.
+static char* enableIncludes(char* pSource)
+{
+    // Find the line holding #version
+    const char* pVersion = NULL;
+    uint32_t line = 1;
+    for (const char* c = pSource; *c; line++) {
+        while (*c == ' ' || *c == '\t') {
+            c++;
+        }
+        if (!strncmp(c, "#version", strlen("#version"))) {
+            pVersion = c;
+            break;
+        }
+        while (*c && *c != '\n') {
+            c++;
+        }
+        if (*c) {
+            c++;
+        }
+    }
+
+    // Without #version, glslang reports the error
+    const char* pLineEnd = pVersion ? strchr(pVersion, '\n') : NULL;
+    if (!pLineEnd) {
+        return pSource;
+    }
+
+    char insert[96];
+    snprintf(insert, sizeof insert, "#extension GL_GOOGLE_include_directive : require\n#line %" PRIu32 "\n", line + 1);
+
+    size_t headLength = (size_t)(pLineEnd + 1 - pSource);
+    size_t insertLength = strlen(insert);
+    size_t tailLength = strlen(pLineEnd + 1);
+
+    char* pResult = GFX_MALLOC(headLength + insertLength + tailLength + 1);
+    memcpy(pResult, pSource, headLength);
+    memcpy(pResult + headLength, insert, insertLength);
+    memcpy(pResult + headLength + insertLength, pLineEnd + 1, tailLength + 1);
+
+    GFX_FREE(pSource);
+    return pResult;
+}
+
+// Compile GLSL to SPIR-V. Returns NULL and reports the errors if it fails.
+static uint32_t* compileGLSL(const char* pPath, VkShaderStageFlagBits stage, size_t* pCodeSize, bool fatal)
+{
+    char* pSource = readFile(pPath, NULL);
+    if (!pSource) {
+        GFX_FAIL(fatal, "Unable to open %s", pPath);
+        return NULL;
+    }
+    pSource = enableIncludes(pSource);
+
+    // Target the SPIR-V version that the Vulkan version guarantees
+    glslang_target_client_version_t clientVersion = GLSLANG_TARGET_VULKAN_1_0;
+    glslang_target_language_version_t spirvVersion = GLSLANG_TARGET_SPV_1_0;
+    if (VK_API_VERSION_MAJOR(gfxDevice.apiVersion) == 1) {
+        switch (VK_API_VERSION_MINOR(gfxDevice.apiVersion)) {
+        case 0:
+            break;
+        case 1:
+            clientVersion = GLSLANG_TARGET_VULKAN_1_1;
+            spirvVersion = GLSLANG_TARGET_SPV_1_3;
+            break;
+        case 2:
+            clientVersion = GLSLANG_TARGET_VULKAN_1_2;
+            spirvVersion = GLSLANG_TARGET_SPV_1_5;
+            break;
+        case 3:
+            clientVersion = GLSLANG_TARGET_VULKAN_1_3;
+            spirvVersion = GLSLANG_TARGET_SPV_1_6;
+            break;
+        default:
+            clientVersion = GLSLANG_TARGET_VULKAN_1_4;
+            spirvVersion = GLSLANG_TARGET_SPV_1_6;
+            break;
+        }
     }
 
     const glslang_input_t input = {
         .language = GLSLANG_SOURCE_GLSL,
-        .stage = glslangStage,
+        .stage = glslangStage(stage),
         .client = GLSLANG_CLIENT_VULKAN,
-        .client_version = glslangVersion,
+        .client_version = clientVersion,
         .target_language = GLSLANG_TARGET_SPV,
-        .target_language_version = GLSLANG_TARGET_SPV_1_6,
-        .code = pShaderSource,
+        .target_language_version = spirvVersion,
+        .code = pSource,
         .default_version = 100,
         .default_profile = GLSLANG_NO_PROFILE,
         .force_default_version_and_profile = false,
         .forward_compatible = false,
-        .messages = GLSLANG_MSG_DEFAULT_BIT,
+        .messages = GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT,
         .resource = glslang_default_resource(),
+        .callbacks =
+            {
+                .include_system = includeFile,
+                .include_local = includeFile,
+                .free_include_result = freeIncludeResult,
+            },
+        .callbacks_ctx = (void*)pPath,
     };
 
     glslang_shader_t* shader = glslang_shader_create(&input);
+    glslang_program_t* program = NULL;
+    uint32_t* pCode = NULL;
 
     if (!glslang_shader_preprocess(shader, &input)) {
-        GFX_ERROR("GLSL preprocessing failed %s\n%s\n%s", pPath, glslang_shader_get_info_log(shader),
-                  glslang_shader_get_info_debug_log(shader));
+        GFX_FAIL(fatal, "GLSL preprocessing failed %s\n%s%s", pPath, glslang_shader_get_info_log(shader),
+                 glslang_shader_get_info_debug_log(shader));
+        goto done;
     }
 
     if (!glslang_shader_parse(shader, &input)) {
-        GFX_ERROR("GLSL parsing failed %s\n%s\n%s\n%s", pPath, glslang_shader_get_info_log(shader),
-                  glslang_shader_get_info_debug_log(shader), glslang_shader_get_preprocessed_code(shader));
+        GFX_FAIL(fatal, "GLSL parsing failed %s\n%s%s", pPath, glslang_shader_get_info_log(shader),
+                 glslang_shader_get_info_debug_log(shader));
+        goto done;
     }
 
-    glslang_program_t* program = glslang_program_create();
+    program = glslang_program_create();
     glslang_program_add_shader(program, shader);
 
     if (!glslang_program_link(program, GLSLANG_MSG_SPV_RULES_BIT | GLSLANG_MSG_VULKAN_RULES_BIT)) {
-        GFX_ERROR("GLSL linking failed %s\n%s\n%s", pPath, glslang_program_get_info_log(program),
-                  glslang_program_get_info_debug_log(program));
+        GFX_FAIL(fatal, "GLSL linking failed %s\n%s%s", pPath, glslang_program_get_info_log(program),
+                 glslang_program_get_info_debug_log(program));
+        goto done;
     }
 
-    glslang_program_SPIRV_generate(program, glslangStage);
+    // The optimizer is left out so that the names used by the reflection are
+    // kept. The driver optimizes the shader anyway.
+    glslang_spv_options_t options = {
+#ifndef NDEBUG
+        .generate_debug_info = true,
+#endif
+        .disable_optimizer = true,
+    };
+    glslang_program_SPIRV_generate_with_options(program, input.stage, &options);
 
-    size_t codeSize = glslang_program_SPIRV_get_size(program) * sizeof(uint32_t);
-    uint32_t* pCode = GFX_MALLOC(codeSize);
-    memset(pCode, 0, codeSize);
+    const char* pMessages = glslang_program_SPIRV_get_messages(program);
+    if (pMessages && pMessages[0]) {
+        GFX_WARNING("%s: %s", pPath, pMessages);
+    }
+
+    *pCodeSize = glslang_program_SPIRV_get_size(program) * sizeof(uint32_t);
+    pCode = GFX_MALLOC(*pCodeSize);
     glslang_program_SPIRV_get(program, pCode);
 
-    const char* spirvMessages = glslang_program_SPIRV_get_messages(program);
-    if (spirvMessages) {
-        GFX_ERROR("(%s) %s", pPath, spirvMessages);
+done:
+    if (program) {
+        glslang_program_delete(program);
+    }
+    glslang_shader_delete(shader);
+    GFX_FREE(pSource);
+
+    return pCode;
+}
+
+// Copy a specialization info, its map entries and data into one allocation
+static VkSpecializationInfo* copySpecializationInfo(const VkSpecializationInfo* pInfo)
+{
+    if (!pInfo) {
+        return NULL;
     }
 
-    glslang_program_delete(program);
-    glslang_shader_delete(shader);
+    size_t entriesSize = pInfo->mapEntryCount * sizeof *pInfo->pMapEntries;
+    VkSpecializationInfo* pCopy = GFX_MALLOC(sizeof *pCopy + entriesSize + pInfo->dataSize);
+    VkSpecializationMapEntry* pEntries = (VkSpecializationMapEntry*)(pCopy + 1);
+    void* pData = (char*)pEntries + entriesSize;
 
-    createShader(pShader, pCode, codeSize, stage, nextStage, pLayout);
+    if (entriesSize) {
+        memcpy(pEntries, pInfo->pMapEntries, entriesSize);
+    }
+    if (pInfo->dataSize) {
+        memcpy(pData, pInfo->pData, pInfo->dataSize);
+    }
 
-    GFX_FREE(pCode);
-    GFX_FREE(pShaderSource);
+    *pCopy = (VkSpecializationInfo){
+        .mapEntryCount = pInfo->mapEntryCount,
+        .pMapEntries = pEntries,
+        .dataSize = pInfo->dataSize,
+        .pData = pData,
+    };
+    return pCopy;
+}
+
+// Get the SPIR-V of a stage, compiling GLSL if needed
+static bool loadStage(GfxShaderStage* pStage, const GfxShaderStageDesc* pDesc, bool fatal)
+{
+    pStage->stage = pDesc->stage;
+    pStage->pSpecializationInfo = copySpecializationInfo(pDesc->pSpecializationInfo);
+
+    if (pDesc->pPath) {
+        pStage->pPath = copyString(pDesc->pPath, SIZE_MAX);
+
+        if (endsWith(pDesc->pPath, strlen(pDesc->pPath), ".spv")) {
+            pStage->pCode = (uint32_t*)readFile(pDesc->pPath, &pStage->codeSize);
+            if (!pStage->pCode) {
+                GFX_FAIL(fatal, "Unable to open %s", pDesc->pPath);
+                return false;
+            }
+        } else {
+            if (!pStage->stage) {
+                pStage->stage = stageFromPath(pDesc->pPath);
+            }
+            if (!pStage->stage) {
+                GFX_FAIL(fatal, "Cannot tell the stage of %s from its extension, set GfxShaderStageDesc::stage",
+                         pDesc->pPath);
+                return false;
+            }
+
+            pStage->pCode = compileGLSL(pDesc->pPath, pStage->stage, &pStage->codeSize, fatal);
+            if (!pStage->pCode) {
+                return false;
+            }
+        }
+    } else if (pDesc->pCode && pDesc->codeSize) {
+        pStage->codeSize = pDesc->codeSize;
+        pStage->pCode = GFX_MALLOC(pDesc->codeSize);
+        memcpy(pStage->pCode, pDesc->pCode, pDesc->codeSize);
+    } else {
+        GFX_FAIL(fatal, "A shader stage needs either a path or SPIR-V code");
+        return false;
+    }
+
+    const char* pName = pStage->pPath ? pStage->pPath : "(SPIR-V)";
+
+    if (!spvIsValid(pStage->pCode, pStage->codeSize)) {
+        GFX_FAIL(fatal, "%s is not valid SPIR-V", pName);
+        return false;
+    }
+
+    if (!pStage->stage) {
+        pStage->stage = spvEntryPointStage(pStage->pCode, pStage->codeSize);
+    }
+    if (!pStage->stage) {
+        GFX_FAIL(fatal, "%s has no entry point to tell its stage from", pName);
+        return false;
+    }
+
+    return true;
+}
+
+// Add a reflected binding to the shader, or merge it with the same binding
+// from another stage. Takes ownership of the names.
+static bool addBinding(GfxShader* pShader, uint32_t* pCapacity, GfxShaderBinding binding, const char* pStageName,
+                       bool fatal)
+{
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        GfxShaderBinding* pExisting = &pShader->pBindings[i];
+        if (pExisting->set != binding.set || pExisting->binding != binding.binding) {
+            continue;
+        }
+
+        GFX_FREE(binding.pName);
+        GFX_FREE(binding.pBlockName);
+
+        if (pExisting->type != binding.type || pExisting->count != binding.count) {
+            GFX_FAIL(fatal, "%s: set %" PRIu32 " binding %" PRIu32 " is declared differently in different stages",
+                     pStageName, binding.set, binding.binding);
+            return false;
+        }
+
+        pExisting->stages |= binding.stages;
+        return true;
+    }
+
+    if (pShader->bindingCount == *pCapacity) {
+        *pCapacity = *pCapacity ? *pCapacity * 2 : 8;
+        pShader->pBindings = GFX_REALLOC(pShader->pBindings, *pCapacity * sizeof *pShader->pBindings);
+        if (!pShader->pBindings) {
+            GFX_ERROR("Unable to allocate memory");
+        }
+    }
+
+    pShader->pBindings[pShader->bindingCount++] = binding;
+    return true;
+}
+
+// Reflect the resources, push constants and local size of a stage
+static bool reflectStage(GfxShader* pShader, const GfxShaderStage* pStage, uint32_t* pBindingCapacity, bool fatal)
+{
+    const char* pStageName = pStage->pPath ? pStage->pPath : "(SPIR-V)";
+
+    GfxSpvModule module;
+    if (!spvParse(&module, pStage->pCode, pStage->codeSize, pStage->pSpecializationInfo)) {
+        GFX_FAIL(fatal, "%s is not valid SPIR-V", pStageName);
+        return false;
+    }
+
+    bool ok = true;
+
+    for (uint32_t id = 1; id < module.idBound && ok; id++) {
+        const uint32_t* in = module.pIds[id].pInstruction;
+        if (!in || spvOpcode(in) != GFX_SPV_OP_VARIABLE || spvWordCount(in) < 4) {
+            continue;
+        }
+
+        uint32_t storageClass = in[3];
+        const uint32_t* pPointer = spvInstruction(&module, in[1]);
+        if (!pPointer || spvOpcode(pPointer) != GFX_SPV_OP_TYPE_POINTER) {
+            continue;
+        }
+        uint32_t typeId = pPointer[3];
+
+        if (storageClass == GFX_SPV_STORAGE_PUSH_CONSTANT) {
+            uint32_t size = (uint32_t)gfxAlignTo(spvTypeSize(&module, typeId, 0, 0), 4);
+            pShader->pushConstantRange.stageFlags |= pStage->stage;
+            pShader->pushConstantRange.size = GFX_MAX(pShader->pushConstantRange.size, size);
+            continue;
+        }
+
+        if (storageClass != GFX_SPV_STORAGE_UNIFORM_CONSTANT && storageClass != GFX_SPV_STORAGE_UNIFORM &&
+            storageClass != GFX_SPV_STORAGE_STORAGE_BUFFER) {
+            continue;
+        }
+
+        const GfxSpvId* pVariable = &module.pIds[id];
+        if (!(pVariable->flags & GFX_SPV_HAS_BINDING)) {
+            continue;
+        }
+
+        // Arrays of descriptors. Arrays of arrays are flattened.
+        uint32_t count = 1;
+        for (const uint32_t* t = spvInstruction(&module, typeId);
+             t && (spvOpcode(t) == GFX_SPV_OP_TYPE_ARRAY || spvOpcode(t) == GFX_SPV_OP_TYPE_RUNTIME_ARRAY);
+             t = spvInstruction(&module, typeId)) {
+            uint32_t length = 0;
+            if (spvOpcode(t) == GFX_SPV_OP_TYPE_RUNTIME_ARRAY || !spvConstant(&module, t[3], &length)) {
+                GFX_FAIL(fatal,
+                         "%s: binding %" PRIu32 " is an unsized array. Give it a size, or size it with a "
+                         "specialization constant.",
+                         pStageName, pVariable->binding);
+                ok = false;
+                break;
+            }
+            count *= length;
+            typeId = t[2];
+        }
+        if (!ok) {
+            break;
+        }
+
+        VkDescriptorType type;
+        if (!spvDescriptorType(&module, typeId, storageClass, &type)) {
+            GFX_FAIL(fatal, "%s: binding %" PRIu32 " has a resource type that is not supported", pStageName,
+                     pVariable->binding);
+            ok = false;
+            break;
+        }
+
+        bool isBlock = module.pIds[typeId].flags & (GFX_SPV_IS_BLOCK | GFX_SPV_IS_BUFFER_BLOCK);
+
+        GfxShaderBinding binding = {
+            .pName = spvName(&module, id),
+            .pBlockName = isBlock ? spvName(&module, typeId) : NULL,
+            .set = (pVariable->flags & GFX_SPV_HAS_SET) ? pVariable->set : 0,
+            .binding = pVariable->binding,
+            .type = type,
+            .count = count,
+            .stages = pStage->stage,
+        };
+
+        ok = addBinding(pShader, pBindingCapacity, binding, pStageName, fatal);
+    }
+
+    // Workgroup size, either given as literals or as constant ids
+    for (uint32_t i = 5; i < module.wordCount; i += spvWordCount(&module.pCode[i])) {
+        const uint32_t* in = &module.pCode[i];
+        if (spvWordCount(in) < 6) {
+            continue;
+        }
+        if (spvOpcode(in) == GFX_SPV_OP_EXECUTION_MODE && in[2] == GFX_SPV_EXECUTION_MODE_LOCAL_SIZE) {
+            memcpy(pShader->localSize, &in[3], sizeof pShader->localSize);
+        } else if (spvOpcode(in) == GFX_SPV_OP_EXECUTION_MODE_ID && in[2] == GFX_SPV_EXECUTION_MODE_LOCAL_SIZE_ID) {
+            for (uint32_t j = 0; j < 3; j++) {
+                spvConstant(&module, in[3 + j], &pShader->localSize[j]);
+            }
+        }
+    }
+
+    GFX_FREE(module.pIds);
+    return ok;
+}
+
+static int compareBindings(const void* pA, const void* pB)
+{
+    const GfxShaderBinding* a = pA;
+    const GfxShaderBinding* b = pB;
+    if (a->set != b->set) {
+        return a->set < b->set ? -1 : 1;
+    }
+    if (a->binding != b->binding) {
+        return a->binding < b->binding ? -1 : 1;
+    }
+    return 0;
+}
+
+// Create descriptor set layouts, the pipeline layout and the descriptor info
+// storage from the reflected bindings
+static bool createLayouts(GfxShader* pShader, bool fatal)
+{
+    if (pShader->bindingCount) {
+        qsort(pShader->pBindings, pShader->bindingCount, sizeof *pShader->pBindings, compareBindings);
+        pShader->setCount = pShader->pBindings[pShader->bindingCount - 1].set + 1;
+    }
+
+    uint32_t maxSets = gfxDevice.properties.physicalDevice.limits.maxBoundDescriptorSets;
+    if (pShader->setCount > maxSets) {
+        GFX_FAIL(fatal, "%s uses %" PRIu32 " descriptor sets, but the device only supports %" PRIu32,
+                 shaderName(pShader), pShader->setCount, maxSets);
+        return false;
+    }
+
+    // Names are how resources are found, so they have to be unambiguous
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        for (uint32_t j = i + 1; j < pShader->bindingCount; j++) {
+            const char* pName = bindingName(&pShader->pBindings[j]);
+            if (!strcmp(bindingName(&pShader->pBindings[i]), pName)) {
+                GFX_WARNING("%s declares '%s' at more than one binding, only set %" PRIu32 " binding %" PRIu32
+                            " can be reached by name",
+                            shaderName(pShader), pName, pShader->pBindings[i].set, pShader->pBindings[i].binding);
+            }
+        }
+    }
+
+    // Lay out the bindings and descriptor infos of each set contiguously
+    pShader->pSets = allocZeroed(GFX_MAX(pShader->setCount, 1), sizeof *pShader->pSets);
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        GfxShaderBinding* pBinding = &pShader->pBindings[i];
+        GfxShaderSet* pSet = &pShader->pSets[pBinding->set];
+
+        if (!pSet->bindingCount) {
+            pSet->firstBinding = i;
+            pSet->firstInfo = pShader->infoCount;
+        }
+        pSet->bindingCount++;
+        pSet->infoCount += pBinding->count;
+
+        pBinding->infoIndex = pShader->infoCount;
+        pShader->infoCount += pBinding->count;
+    }
+
+    // Every set gets a layout, also the ones without bindings, since the
+    // pipeline layout has to have one for every set up to the last
+    VkDescriptorSetLayout* pSetLayouts = allocZeroed(GFX_MAX(pShader->setCount, 1), sizeof *pSetLayouts);
+    VkDescriptorSetLayoutBinding* pLayoutBindings =
+        allocZeroed(GFX_MAX(pShader->bindingCount, 1), sizeof *pLayoutBindings);
+
+    for (uint32_t s = 0; s < pShader->setCount; s++) {
+        GfxShaderSet* pSet = &pShader->pSets[s];
+
+        for (uint32_t i = 0; i < pSet->bindingCount; i++) {
+            const GfxShaderBinding* pBinding = &pShader->pBindings[pSet->firstBinding + i];
+            pLayoutBindings[i] = (VkDescriptorSetLayoutBinding){
+                .binding = pBinding->binding,
+                .descriptorType = pBinding->type,
+                .descriptorCount = pBinding->count,
+                .stageFlags = pBinding->stages,
+            };
+        }
+
+        VkDescriptorSetLayoutCreateInfo ci = {
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .bindingCount = pSet->bindingCount,
+            .pBindings = pLayoutBindings,
+        };
+        VK_CHECK(vkCreateDescriptorSetLayout(gfxDevice.device, &ci, NULL, &pSet->layout));
+        pSetLayouts[s] = pSet->layout;
+    }
+
+    VkPipelineLayoutCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .setLayoutCount = pShader->setCount,
+        .pSetLayouts = pSetLayouts,
+        .pushConstantRangeCount = pShader->pushConstantRange.size ? 1 : 0,
+        .pPushConstantRanges = &pShader->pushConstantRange,
+    };
+    VK_CHECK(vkCreatePipelineLayout(gfxDevice.device, &ci, NULL, &pShader->pipelineLayout));
+
+    GFX_FREE(pLayoutBindings);
+    GFX_FREE(pSetLayouts);
+
+    // Pool sizes for one generation of every set
+    pShader->pPoolSizes = allocZeroed(GFX_MAX(pShader->bindingCount, 1), sizeof *pShader->pPoolSizes);
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        const GfxShaderBinding* pBinding = &pShader->pBindings[i];
+        uint32_t j = 0;
+        while (j < pShader->poolSizeCount && pShader->pPoolSizes[j].type != pBinding->type) {
+            j++;
+        }
+        if (j == pShader->poolSizeCount) {
+            pShader->pPoolSizes[pShader->poolSizeCount++].type = pBinding->type;
+        }
+        pShader->pPoolSizes[j].descriptorCount += pBinding->count;
+    }
+
+    size_t infoCount = GFX_MAX(pShader->infoCount, 1);
+    pShader->pWrittenBufferInfos = allocZeroed(infoCount, sizeof *pShader->pWrittenBufferInfos);
+    pShader->pWrittenImageInfos = allocZeroed(infoCount, sizeof *pShader->pWrittenImageInfos);
+    pShader->pResolvedBufferInfos = allocZeroed(infoCount, sizeof *pShader->pResolvedBufferInfos);
+    pShader->pResolvedImageInfos = allocZeroed(infoCount, sizeof *pShader->pResolvedImageInfos);
+    pShader->pWrites = allocZeroed(GFX_MAX(pShader->bindingCount, 1), sizeof *pShader->pWrites);
+
+    return true;
+}
+
+// The stage that follows a stage in the shader, or the fragment stage if the
+// shader has none, so that the stage can be used with any fragment shader
+static VkShaderStageFlags nextStage(VkShaderStageFlagBits stage, VkShaderStageFlags stages)
+{
+    switch (stage) {
+    case VK_SHADER_STAGE_VERTEX_BIT:
+        if (stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) {
+            return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+        }
+        return (stages & VK_SHADER_STAGE_GEOMETRY_BIT) ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+    case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
+        return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
+        return (stages & VK_SHADER_STAGE_GEOMETRY_BIT) ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
+    case VK_SHADER_STAGE_GEOMETRY_BIT:
+        return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case VK_SHADER_STAGE_TASK_BIT_EXT:
+        return VK_SHADER_STAGE_MESH_BIT_EXT;
+    case VK_SHADER_STAGE_MESH_BIT_EXT:
+        return VK_SHADER_STAGE_FRAGMENT_BIT;
+    default:
+        return 0;
+    }
+}
+
+static bool buildShaderObjects(GfxShader* pShader, bool fatal)
+{
+    // Ray tracing stages are built into ray tracing pipelines instead
+    if (pShader->stages & GFX_RAY_TRACING_STAGES) {
+        return true;
+    }
+
+    VkDescriptorSetLayout* pSetLayouts = allocZeroed(GFX_MAX(pShader->setCount, 1), sizeof *pSetLayouts);
+    for (uint32_t s = 0; s < pShader->setCount; s++) {
+        pSetLayouts[s] = pShader->pSets[s].layout;
+    }
+
+    VkShaderCreateInfoEXT* pInfos = allocZeroed(pShader->stageCount, sizeof *pInfos);
+    VkShaderEXT* pShaders = allocZeroed(pShader->stageCount, sizeof *pShaders);
+
+    // Graphics stages are linked, which allows optimizing across them
+    bool link = pShader->stageCount > 1;
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        const GfxShaderStage* pStage = &pShader->pStages[i];
+
+        VkShaderCreateFlagsEXT flags = link ? VK_SHADER_CREATE_LINK_STAGE_BIT_EXT : 0;
+        if (pStage->stage == VK_SHADER_STAGE_MESH_BIT_EXT && !(pShader->stages & VK_SHADER_STAGE_TASK_BIT_EXT)) {
+            flags |= VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT;
+        }
+
+        pInfos[i] = (VkShaderCreateInfoEXT){
+            .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+            .flags = flags,
+            .stage = pStage->stage,
+            .nextStage = nextStage(pStage->stage, pShader->stages),
+            .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+            .codeSize = pStage->codeSize,
+            .pCode = pStage->pCode,
+            .pName = "main",
+            .setLayoutCount = pShader->setCount,
+            .pSetLayouts = pSetLayouts,
+            .pushConstantRangeCount = pShader->pushConstantRange.size ? 1 : 0,
+            .pPushConstantRanges = &pShader->pushConstantRange,
+            .pSpecializationInfo = pStage->pSpecializationInfo,
+        };
+    }
+
+    VkResult result = gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, pShader->stageCount, pInfos, NULL, pShaders);
+
+    bool ok = result >= 0;
+    if (ok) {
+        for (uint32_t i = 0; i < pShader->stageCount; i++) {
+            pShader->pStages[i].shader = pShaders[i];
+        }
+    } else {
+        GFX_FAIL(fatal, "Failed to create shader objects for %s: %s", shaderName(pShader), gfxResultString(result));
+    }
+
+    GFX_FREE(pShaders);
+    GFX_FREE(pInfos);
+    GFX_FREE(pSetLayouts);
+
+    return ok;
+}
+
+static bool createShader(GfxShader* pShader, uint32_t stageCount, const GfxShaderStageDesc* pDescs, bool fatal)
+{
+    GFX_RESET(pShader);
+
+    if (!gfxDevice.device) {
+        GFX_ERROR("Device not initialized");
+        return false;
+    }
+
+    if (!stageCount || !pDescs) {
+        GFX_FAIL(fatal, "A shader needs at least one stage");
+        return false;
+    }
+
+    pShader->stageCount = stageCount;
+    pShader->pStages = allocZeroed(stageCount, sizeof *pShader->pStages);
+
+    for (uint32_t i = 0; i < stageCount; i++) {
+        if (!loadStage(&pShader->pStages[i], &pDescs[i], fatal)) {
+            goto fail;
+        }
+
+        VkShaderStageFlagBits stage = pShader->pStages[i].stage;
+
+        // Ray tracing pipelines can have several stages of the same kind
+        if ((pShader->stages & stage) && !(stage & GFX_RAY_TRACING_STAGES)) {
+            GFX_FAIL(fatal, "%s: the shader already has a stage of this kind", shaderName(pShader));
+            goto fail;
+        }
+        pShader->stages |= stage;
+    }
+
+    if ((pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT) && stageCount > 1) {
+        GFX_FAIL(fatal, "%s: a compute stage must be on its own", shaderName(pShader));
+        goto fail;
+    }
+    if ((pShader->stages & GFX_RAY_TRACING_STAGES) && (pShader->stages & ~GFX_RAY_TRACING_STAGES)) {
+        GFX_FAIL(fatal, "%s: ray tracing stages cannot be combined with other stages", shaderName(pShader));
+        goto fail;
+    }
+
+    uint32_t bindingCapacity = 0;
+    for (uint32_t i = 0; i < stageCount; i++) {
+        if (!reflectStage(pShader, &pShader->pStages[i], &bindingCapacity, fatal)) {
+            goto fail;
+        }
+    }
+
+    if (!createLayouts(pShader, fatal) || !buildShaderObjects(pShader, fatal)) {
+        goto fail;
+    }
+
+    GFX_INFO("Created shader: %s", shaderName(pShader));
+    for (uint32_t i = 1; i < stageCount; i++) {
+        GFX_INFO("                %s", pShader->pStages[i].pPath ? pShader->pStages[i].pPath : "(SPIR-V)");
+    }
+#ifndef NDEBUG
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        const GfxShaderBinding* pBinding = &pShader->pBindings[i];
+        GFX_DEBUG(" * set %" PRIu32 ", binding %" PRIu32 ": %s '%s' (%" PRIu32 ")", pBinding->set, pBinding->binding,
+                  descriptorTypeName(pBinding->type), bindingName(pBinding), pBinding->count);
+    }
+    if (pShader->pushConstantRange.size) {
+        GFX_DEBUG(" * push constants: %" PRIu32 " bytes", pShader->pushConstantRange.size);
+    }
+#endif
+
+    return true;
+
+fail:
+    gfxDestroyShader(pShader);
+    return false;
+}
+
+void gfxCreateShader(uint32_t stageCount, const GfxShaderStageDesc* pStages, GfxShader* pShader)
+{
+    createShader(pShader, stageCount, pStages, true);
 }
 
 void gfxDestroyShader(GfxShader* pShader)
 {
     vkDeviceWaitIdle(gfxDevice.device);
 
-    gfxDevice.fn.vkDestroyShaderEXT(gfxDevice.device, pShader->shader, NULL);
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        GfxShaderStage* pStage = &pShader->pStages[i];
+        if (pStage->shader) {
+            gfxDevice.fn.vkDestroyShaderEXT(gfxDevice.device, pStage->shader, NULL);
+        }
+        GFX_FREE(pStage->pPath);
+        GFX_FREE(pStage->pCode);
+        GFX_FREE(pStage->pSpecializationInfo);
+    }
+    GFX_FREE(pShader->pStages);
 
-    GFX_FREE(pShader->pCode);
-    GFX_FREE(pShader->pPath);
-    GFX_FREE(pShader->pPushConstantRanges);
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        GFX_FREE(pShader->pBindings[i].pName);
+        GFX_FREE(pShader->pBindings[i].pBlockName);
+    }
+    GFX_FREE(pShader->pBindings);
+
+    // Sets are freed with their pools
+    for (uint32_t i = 0; i < pShader->setCount; i++) {
+        vkDestroyDescriptorSetLayout(gfxDevice.device, pShader->pSets[i].layout, NULL);
+        GFX_FREE(pShader->pSets[i].pRetired);
+    }
+    GFX_FREE(pShader->pSets);
+
+    vkDestroyPipelineLayout(gfxDevice.device, pShader->pipelineLayout, NULL);
+
+    for (uint32_t i = 0; i < pShader->poolCount; i++) {
+        vkDestroyDescriptorPool(gfxDevice.device, pShader->pPools[i], NULL);
+    }
+    GFX_FREE(pShader->pPools);
+    GFX_FREE(pShader->pPoolSizes);
+
+    GFX_FREE(pShader->pWrittenBufferInfos);
+    GFX_FREE(pShader->pWrittenImageInfos);
+    GFX_FREE(pShader->pResolvedBufferInfos);
+    GFX_FREE(pShader->pResolvedImageInfos);
+    GFX_FREE(pShader->pWrites);
 
     GFX_RESET(pShader);
 }
 
-// Shaders created from SPIR-V byte code have no source path
-#define GFX_SHADER_NAME(pShader) ((pShader)->pPath ? (pShader)->pPath : "(SPIR-V)")
-
-void gfxBuildShader(GfxShader* pShader)
+static GfxShaderBinding* findBinding(const GfxShader* pShader, const char* pName)
 {
-    GFX_INFO("Building shader: %s", GFX_SHADER_NAME(pShader));
-    VK_CHECK(gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, 1, &pShader->createInfo, NULL, &pShader->shader));
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        GfxShaderBinding* pBinding = &pShader->pBindings[i];
+        if ((pBinding->pName[0] && !strcmp(pBinding->pName, pName)) ||
+            (pBinding->pBlockName && !strcmp(pBinding->pBlockName, pName))) {
+            return pBinding;
+        }
+    }
+    return NULL;
 }
 
-void gfxBuildLinkedShaders(GfxShader* pVertexShader, GfxShader* pFragmentShader)
+bool gfxReloadShader(GfxShader* pShader)
 {
-    if (!pVertexShader || !pFragmentShader) {
-        GFX_ERROR("Both pVertexShader and pFragmentShader need to be specified");
+    // Recreate from the same descriptions. They point into the current shader,
+    // which is left alone until the new one has been created.
+    GfxShaderStageDesc* pDescs = allocZeroed(pShader->stageCount, sizeof *pDescs);
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        const GfxShaderStage* pStage = &pShader->pStages[i];
+        pDescs[i] = (GfxShaderStageDesc){
+            .pPath = pStage->pPath,
+            .pCode = pStage->pPath ? NULL : pStage->pCode,
+            .codeSize = pStage->pPath ? 0 : pStage->codeSize,
+            .stage = pStage->stage,
+            .pSpecializationInfo = pStage->pSpecializationInfo,
+        };
     }
 
-    GFX_INFO("Building shaders: %s", GFX_SHADER_NAME(pVertexShader));
-    GFX_INFO("                  %s", GFX_SHADER_NAME(pFragmentShader));
+    GfxShader reloaded;
+    bool ok = createShader(&reloaded, pShader->stageCount, pDescs, false);
+    GFX_FREE(pDescs);
 
-    VkShaderCreateInfoEXT createInfos[] = {
-        pVertexShader->createInfo,
-        pFragmentShader->createInfo,
-    };
-
-    for (uint32_t i = 0; i < GFX_ARRAY_LEN(createInfos); i++) {
-        createInfos[i].flags |= VK_SHADER_CREATE_LINK_STAGE_BIT_EXT;
+    if (!ok) {
+        GFX_WARNING("Reloading %s failed, keeping the previous version", shaderName(pShader));
+        return false;
     }
 
-    VkShaderEXT shaders[GFX_ARRAY_LEN(createInfos)];
+    // Attach the resources again by name, since they may have moved to other
+    // sets and bindings
+    for (uint32_t i = 0; i < pShader->bindingCount; i++) {
+        const GfxShaderBinding* pOld = &pShader->pBindings[i];
+        if (!pOld->pBuffer && !pOld->pTextures && !pOld->pImage) {
+            continue;
+        }
 
-    VK_CHECK(gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, GFX_ARRAY_LEN(createInfos), createInfos, NULL, shaders));
+        GfxShaderBinding* pNew = findBinding(&reloaded, bindingName(pOld));
+        if (!pNew || pNew->type != pOld->type || pNew->count != pOld->count) {
+            GFX_WARNING("'%s' no longer matches a resource in %s and is not attached", bindingName(pOld),
+                        shaderName(pShader));
+            continue;
+        }
 
-    pVertexShader->shader = shaders[0];
-    pFragmentShader->shader = shaders[1];
+        pNew->pBuffer = pOld->pBuffer;
+        pNew->offset = pOld->offset;
+        pNew->range = pOld->range;
+        pNew->pTextures = pOld->pTextures;
+        pNew->pImage = pOld->pImage;
+        pNew->imageLayout = pOld->imageLayout;
+    }
+
+    gfxDestroyShader(pShader);
+    *pShader = reloaded;
+
+    return true;
+}
+
+const GfxShaderBinding* gfxGetShaderBinding(const GfxShader* pShader, const char* pName)
+{
+    return findBinding(pShader, pName);
+}
+
+// Look up a binding and check that it takes the kind of resource being attached
+static GfxShaderBinding* resolveBinding(GfxShader* pShader, const char* pName, const char* pKind,
+                                        const VkDescriptorType* pAllowed, uint32_t allowedCount)
+{
+    GfxShaderBinding* pBinding = findBinding(pShader, pName);
+    if (!pBinding) {
+        GFX_ERROR("%s has no resource named '%s'. A block declared without an instance name is reached through its "
+                  "block type name.",
+                  shaderName(pShader), pName);
+        return NULL;
+    }
+
+    for (uint32_t i = 0; i < allowedCount; i++) {
+        if (pBinding->type == pAllowed[i]) {
+            // Only one resource is attached at a time
+            pBinding->pBuffer = NULL;
+            pBinding->pTextures = NULL;
+            pBinding->pImage = NULL;
+            return pBinding;
+        }
+    }
+
+    GFX_ERROR("'%s' is a %s in %s and cannot be set from a %s", pName, descriptorTypeName(pBinding->type),
+              shaderName(pShader), pKind);
+    return NULL;
+}
+
+void gfxSetShaderBuffer(GfxShader* pShader, const char* pName, const GfxBuffer* pBuffer)
+{
+    gfxSetShaderBufferRange(pShader, pName, pBuffer, 0, VK_WHOLE_SIZE);
+}
+
+void gfxSetShaderBufferRange(GfxShader* pShader, const char* pName, const GfxBuffer* pBuffer, VkDeviceSize offset,
+                             VkDeviceSize range)
+{
+    static const VkDescriptorType allowed[] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+
+    GfxShaderBinding* pBinding = resolveBinding(pShader, pName, "buffer", allowed, GFX_ARRAY_LEN(allowed));
+    if (!pBinding) {
+        return;
+    }
+
+    if (pBinding->count != 1) {
+        GFX_ERROR("'%s' is an array of %" PRIu32 " buffers, which cannot be attached", pName, pBinding->count);
+        return;
+    }
+
+    VkBufferUsageFlags usage = pBinding->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ? VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT
+                                                                                   : VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    if (!(pBuffer->usage & usage)) {
+        GFX_ERROR("'%s' is a %s, but the buffer was not created with that usage", pName,
+                  descriptorTypeName(pBinding->type));
+        return;
+    }
+
+    pBinding->pBuffer = pBuffer;
+    pBinding->offset = offset;
+    pBinding->range = range;
+}
+
+void gfxSetShaderTexture(GfxShader* pShader, const char* pName, const GfxTexture* pTexture)
+{
+    gfxSetShaderTextureArray(pShader, pName, 1, pTexture);
+}
+
+void gfxSetShaderTextureArray(GfxShader* pShader, const char* pName, uint32_t textureCount, const GfxTexture* pTextures)
+{
+    static const VkDescriptorType allowed[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                               VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLER};
+
+    GfxShaderBinding* pBinding = resolveBinding(pShader, pName, "texture", allowed, GFX_ARRAY_LEN(allowed));
+    if (!pBinding) {
+        return;
+    }
+
+    if (pBinding->count != textureCount) {
+        GFX_ERROR("'%s' has %" PRIu32 " descriptors in the shader, but %" PRIu32 " textures were given", pName,
+                  pBinding->count, textureCount);
+        return;
+    }
+
+    pBinding->pTextures = pTextures;
+}
+
+void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkImageLayout layout)
+{
+    static const VkDescriptorType allowed[] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                               VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT};
+
+    GfxShaderBinding* pBinding = resolveBinding(pShader, pName, "image", allowed, GFX_ARRAY_LEN(allowed));
+    if (!pBinding) {
+        return;
+    }
+
+    if (pBinding->count != 1) {
+        GFX_ERROR("'%s' is an array of %" PRIu32 " images, which cannot be attached", pName, pBinding->count);
+        return;
+    }
+
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        layout = pBinding->type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ? VK_IMAGE_LAYOUT_GENERAL
+                                                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    pBinding->pImage = pImage;
+    pBinding->imageLayout = layout;
 }
 
 void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader)
 {
-    gfxDevice.fn.vkCmdBindShadersEXT(cmd, 1, &pShader->createInfo.stage, &pShader->shader);
+    if (pShader->stages & GFX_RAY_TRACING_STAGES) {
+        GFX_ERROR("%s has ray tracing stages, which are used through a ray tracing pipeline", shaderName(pShader));
+        return;
+    }
+
+    static const VkShaderStageFlagBits graphicsStages[] = {
+        VK_SHADER_STAGE_VERTEX_BIT,
+        VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+        VK_SHADER_STAGE_GEOMETRY_BIT,
+        VK_SHADER_STAGE_FRAGMENT_BIT,
+        VK_SHADER_STAGE_TASK_BIT_EXT,
+        VK_SHADER_STAGE_MESH_BIT_EXT,
+    };
+
+    // A shader has at most one of each graphics stage, or a single compute stage
+    VkShaderStageFlagBits stages[GFX_ARRAY_LEN(graphicsStages)];
+    VkShaderEXT shaders[GFX_ARRAY_LEN(graphicsStages)];
+    uint32_t count = 0;
+
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        stages[count] = pShader->pStages[i].stage;
+        shaders[count++] = pShader->pStages[i].shader;
+    }
+
+    // Graphics stages the shader does not have are unbound, so that nothing
+    // from a previously bound shader is left behind
+    if (!(pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        for (uint32_t i = 0; i < GFX_ARRAY_LEN(graphicsStages); i++) {
+            if ((gfxDevice.graphicsShaderStages & graphicsStages[i]) && !(pShader->stages & graphicsStages[i])) {
+                stages[count] = graphicsStages[i];
+                shaders[count++] = VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    gfxDevice.fn.vkCmdBindShadersEXT(cmd, count, stages, shaders);
+}
+
+static VkPipelineBindPoint shaderBindPoint(const GfxShader* pShader)
+{
+    if (pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT) {
+        return VK_PIPELINE_BIND_POINT_COMPUTE;
+    }
+    if (pShader->stages & GFX_RAY_TRACING_STAGES) {
+        return VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR;
+    }
+    return VK_PIPELINE_BIND_POINT_GRAPHICS;
+}
+
+// Turn what is attached to the bindings of a set into descriptor infos.
+// Bindings without a usable resource are left zeroed and are not written.
+// Returns the number of bindings that will be written.
+static uint32_t resolveSet(GfxShader* pShader, const GfxShaderSet* pSet)
+{
+    memset(&pShader->pResolvedBufferInfos[pSet->firstInfo], 0, pSet->infoCount * sizeof *pShader->pResolvedBufferInfos);
+    memset(&pShader->pResolvedImageInfos[pSet->firstInfo], 0, pSet->infoCount * sizeof *pShader->pResolvedImageInfos);
+
+    uint32_t resolved = 0;
+
+    for (uint32_t i = 0; i < pSet->bindingCount; i++) {
+        GfxShaderBinding* pBinding = &pShader->pBindings[pSet->firstBinding + i];
+        VkDescriptorBufferInfo* pBufferInfo = &pShader->pResolvedBufferInfos[pBinding->infoIndex];
+        VkDescriptorImageInfo* pImageInfos = &pShader->pResolvedImageInfos[pBinding->infoIndex];
+
+        if (pBinding->pBuffer) {
+            if (!pBinding->pBuffer->buffer) {
+                GFX_ERROR("The buffer attached to '%s' has been destroyed", bindingName(pBinding));
+                continue;
+            }
+            pBufferInfo->buffer = pBinding->pBuffer->buffer;
+            pBufferInfo->offset = pBinding->offset;
+            pBufferInfo->range = pBinding->range;
+            resolved++;
+        } else if (pBinding->pTextures) {
+            bool valid = true;
+            for (uint32_t j = 0; j < pBinding->count; j++) {
+                const GfxTexture* pTexture = &pBinding->pTextures[j];
+                if (!pTexture->sampler || !pTexture->image.imageView) {
+                    valid = false;
+                    break;
+                }
+                pImageInfos[j].sampler = pTexture->sampler;
+                pImageInfos[j].imageView = pTexture->image.imageView;
+                pImageInfos[j].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            }
+            if (!valid) {
+                GFX_ERROR("A texture attached to '%s' has been destroyed", bindingName(pBinding));
+                memset(pImageInfos, 0, pBinding->count * sizeof *pImageInfos);
+                continue;
+            }
+            resolved++;
+        } else if (pBinding->pImage) {
+            if (!pBinding->pImage->imageView) {
+                GFX_ERROR("The image attached to '%s' has been destroyed or has no image view", bindingName(pBinding));
+                continue;
+            }
+            pImageInfos[0].imageView = pBinding->pImage->imageView;
+            pImageInfos[0].imageLayout = pBinding->imageLayout;
+            resolved++;
+        } else if (!pBinding->reported) {
+            GFX_WARNING("%s: '%s' (set %" PRIu32 ", binding %" PRIu32 ") has nothing attached", shaderName(pShader),
+                        bindingName(pBinding), pBinding->set, pBinding->binding);
+            pBinding->reported = true;
+        }
+    }
+
+    return resolved;
+}
+
+static bool setChanged(const GfxShader* pShader, const GfxShaderSet* pSet)
+{
+    if (!pSet->current || pSet->generation != gfxDevice.resourceGeneration) {
+        return true;
+    }
+
+    return memcmp(&pShader->pResolvedBufferInfos[pSet->firstInfo], &pShader->pWrittenBufferInfos[pSet->firstInfo],
+                  pSet->infoCount * sizeof *pShader->pResolvedBufferInfos) ||
+           memcmp(&pShader->pResolvedImageInfos[pSet->firstInfo], &pShader->pWrittenImageInfos[pSet->firstInfo],
+                  pSet->infoCount * sizeof *pShader->pResolvedImageInfos);
+}
+
+static void createDescriptorPool(GfxShader* pShader)
+{
+    VkDescriptorPoolSize* pSizes = allocZeroed(GFX_MAX(pShader->poolSizeCount, 1), sizeof *pSizes);
+    for (uint32_t i = 0; i < pShader->poolSizeCount; i++) {
+        pSizes[i] = (VkDescriptorPoolSize){
+            .type = pShader->pPoolSizes[i].type,
+            .descriptorCount = pShader->pPoolSizes[i].descriptorCount * GFX_DESCRIPTOR_SETS_PER_POOL,
+        };
+    }
+
+    VkDescriptorPoolCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = pShader->setCount * GFX_DESCRIPTOR_SETS_PER_POOL,
+        .poolSizeCount = pShader->poolSizeCount,
+        .pPoolSizes = pSizes,
+    };
+
+    VkDescriptorPool pool;
+    VK_CHECK(vkCreateDescriptorPool(gfxDevice.device, &ci, NULL, &pool));
+    GFX_FREE(pSizes);
+
+    pShader->pPools = GFX_REALLOC(pShader->pPools, (pShader->poolCount + 1) * sizeof *pShader->pPools);
+    if (!pShader->pPools) {
+        GFX_ERROR("Unable to allocate memory");
+    }
+    pShader->pPools[pShader->poolCount++] = pool;
+}
+
+// Get a descriptor set that no frame in flight can be using: a retired one
+// whose last frame has finished, or a newly allocated one
+static VkDescriptorSet acquireDescriptorSet(GfxShader* pShader, GfxShaderSet* pSet)
+{
+    for (uint32_t i = 0; i < pSet->retiredCount; i++) {
+        if (pSet->pRetired[i].frame < gfxDevice.completedFrames) {
+            VkDescriptorSet set = pSet->pRetired[i].set;
+            pSet->pRetired[i] = pSet->pRetired[--pSet->retiredCount];
+            return set;
+        }
+    }
+
+    if (!pShader->poolCount) {
+        createDescriptorPool(pShader);
+    }
+
+    VkDescriptorSetAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pShader->pPools[pShader->poolCount - 1],
+        .descriptorSetCount = 1,
+        .pSetLayouts = &pSet->layout,
+    };
+
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VkResult result = vkAllocateDescriptorSets(gfxDevice.device, &ai, &set);
+
+    // Sets are never freed back to their pool, so a full pool is followed by another
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        createDescriptorPool(pShader);
+        ai.descriptorPool = pShader->pPools[pShader->poolCount - 1];
+        result = vkAllocateDescriptorSets(gfxDevice.device, &ai, &set);
+    }
+
+    VK_CHECK(result);
+    return set;
+}
+
+// Keep a set that has been replaced until the frame being recorded, which may
+// still use it, has finished
+static void retireDescriptorSet(GfxShaderSet* pSet)
+{
+    if (!pSet->current) {
+        return;
+    }
+
+    if (pSet->retiredCount == pSet->retiredCapacity) {
+        pSet->retiredCapacity = pSet->retiredCapacity ? pSet->retiredCapacity * 2 : 4;
+        pSet->pRetired = GFX_REALLOC(pSet->pRetired, pSet->retiredCapacity * sizeof *pSet->pRetired);
+        if (!pSet->pRetired) {
+            GFX_ERROR("Unable to allocate memory");
+        }
+    }
+
+    pSet->pRetired[pSet->retiredCount++] = (GfxRetiredDescriptorSet){
+        .set = pSet->current,
+        .frame = gfxDevice.frame,
+    };
+    pSet->current = VK_NULL_HANDLE;
+}
+
+static void writeDescriptorSet(GfxShader* pShader, GfxShaderSet* pSet)
+{
+    memcpy(&pShader->pWrittenBufferInfos[pSet->firstInfo], &pShader->pResolvedBufferInfos[pSet->firstInfo],
+           pSet->infoCount * sizeof *pShader->pWrittenBufferInfos);
+    memcpy(&pShader->pWrittenImageInfos[pSet->firstInfo], &pShader->pResolvedImageInfos[pSet->firstInfo],
+           pSet->infoCount * sizeof *pShader->pWrittenImageInfos);
+
+    uint32_t writeCount = 0;
+    for (uint32_t i = 0; i < pSet->bindingCount; i++) {
+        const GfxShaderBinding* pBinding = &pShader->pBindings[pSet->firstBinding + i];
+        const VkDescriptorBufferInfo* pBufferInfo = &pShader->pWrittenBufferInfos[pBinding->infoIndex];
+        const VkDescriptorImageInfo* pImageInfo = &pShader->pWrittenImageInfos[pBinding->infoIndex];
+
+        VkWriteDescriptorSet write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = pSet->current,
+            .dstBinding = pBinding->binding,
+            .dstArrayElement = 0,
+            .descriptorCount = pBinding->count,
+            .descriptorType = pBinding->type,
+        };
+
+        // Bindings that did not resolve are left unwritten
+        if (isBufferDescriptor(pBinding->type) && pBufferInfo->buffer) {
+            write.pBufferInfo = pBufferInfo;
+        } else if (isImageDescriptor(pBinding->type) && (pImageInfo->imageView || pImageInfo->sampler)) {
+            write.pImageInfo = pImageInfo;
+        } else {
+            continue;
+        }
+
+        pShader->pWrites[writeCount++] = write;
+    }
+
+    vkUpdateDescriptorSets(gfxDevice.device, writeCount, pShader->pWrites, 0, NULL);
+
+    pSet->generation = gfxDevice.resourceGeneration;
+}
+
+void gfxCmdBindResources(VkCommandBuffer cmd, GfxShader* pShader)
+{
+    VkPipelineBindPoint bindPoint = shaderBindPoint(pShader);
+
+    for (uint32_t s = 0; s < pShader->setCount; s++) {
+        GfxShaderSet* pSet = &pShader->pSets[s];
+
+        if (!pSet->bindingCount || !resolveSet(pShader, pSet)) {
+            continue;
+        }
+
+        // A set is never written while a frame in flight may read it, a new
+        // one is taken instead
+        if (setChanged(pShader, pSet)) {
+            retireDescriptorSet(pSet);
+            pSet->current = acquireDescriptorSet(pShader, pSet);
+            writeDescriptorSet(pShader, pSet);
+        }
+
+        vkCmdBindDescriptorSets(cmd, bindPoint, pShader->pipelineLayout, s, 1, &pSet->current, 0, NULL);
+    }
+}
+
+void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t offset, uint32_t size,
+                         const void* pData)
+{
+    if ((uint64_t)offset + size > pShader->pushConstantRange.size) {
+        GFX_ERROR("Pushing %" PRIu32 " bytes at offset %" PRIu32 ", but %s only has %" PRIu32
+                  " bytes of push constants",
+                  size, offset, shaderName(pShader), pShader->pushConstantRange.size);
+        return;
+    }
+
+    vkCmdPushConstants(cmd, pShader->pipelineLayout, pShader->pushConstantRange.stageFlags, offset, size, pData);
 }
 
 void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet,
