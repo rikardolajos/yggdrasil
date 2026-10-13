@@ -195,19 +195,22 @@ int main()
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
     // The render graph owns the images the frame is rendered to, and recreates
-    // them when the window is resized
+    // them when the window is resized. They are multisampled, and the graph
+    // resolves the color image at the end of the pass.
     GfxRenderGraph graph;
     gfxCreateRenderGraph(&graph);
     gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
                                  .pName = "color",
                                  .format = VK_FORMAT_R8G8B8A8_UNORM,
                                  .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 .samples = gfxGetDeviceSampleCount(),
                                  .clearColor = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}},
                              });
     gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
                                  .pName = "depth",
                                  .format = gfxFindDepthFormat(),
                                  .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                 .samples = gfxGetDeviceSampleCount(),
                              });
 
     GfxShaderStageDesc shaderStages[] = {

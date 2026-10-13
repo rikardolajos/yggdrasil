@@ -245,7 +245,8 @@ int main()
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
     // The shadow map has a fixed size and is both rendered to and sampled. The
-    // color and depth images follow the window.
+    // color and depth images follow the window and are multisampled, and the
+    // graph resolves the color image at the end of the scene pass.
     GfxRenderGraph graph;
     gfxCreateRenderGraph(&graph);
     GfxImage* pShadowMap =
@@ -260,12 +261,14 @@ int main()
                                  .pName = "color",
                                  .format = VK_FORMAT_R8G8B8A8_UNORM,
                                  .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                 .samples = gfxGetDeviceSampleCount(),
                                  .clearColor = {.float32 = {0.6f, 0.75f, 1.0f, 1.0f}},
                              });
     gfxAddGraphImage(&graph, &(GfxGraphImageDesc){
                                  .pName = "depth",
                                  .format = gfxFindDepthFormat(),
                                  .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                 .samples = gfxGetDeviceSampleCount(),
                              });
 
     // The shadow shader has no fragment stage, depth is all it produces

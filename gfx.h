@@ -600,12 +600,21 @@ typedef struct GfxRayTracingPipeline {
 // attachment and any other image as a storage image, and a pass reads an image
 // as sampled if it has sampled usage and as a storage image otherwise. Leave
 // width and height as 0 to follow the size of the swapchain.
+//
+// Multisampling is set with samples, where 0 means single-sampled. Graphics
+// passes render a multisampled color image into a multisampled image the graph
+// keeps on the side, and resolve it by averaging into the image itself at the
+// end of the pass, so it needs a float or normalized format and attachment
+// usage. Everything else, other passes, gfxGetGraphImage() and gfxPresent(),
+// sees the resolved image. A multisampled depth image is not resolved. The
+// attachments of a pass must all have the same sample count.
 typedef struct GfxGraphImageDesc {
     const char* pName;
     VkFormat format;
     VkImageUsageFlags usage;
     uint32_t width;
     uint32_t height;
+    VkSampleCountFlagBits samples;
     VkClearColorValue clearColor; // Color attachments are cleared to this, depth to GFX_DEPTH_CLEAR
 } GfxGraphImageDesc;
 
@@ -637,6 +646,7 @@ typedef struct GfxPassDesc {
 typedef struct GfxGraphResource {
     char* pName;
     GfxImage image;           // Owned by the graph, for images
+    GfxImage multisampled;    // Rendered to and resolved into image, for multisampled color images
     const GfxBuffer* pBuffer; // Owned by the application, for buffers
     GfxGraphImageDesc desc;
     VkImageLayout layout; // Layout the image is in where recording has got to
@@ -6110,6 +6120,9 @@ void gfxDestroyRenderGraph(GfxRenderGraph* pGraph)
         if (pResource->image.image) {
             gfxDestroyImage(&pResource->image);
         }
+        if (pResource->multisampled.image) {
+            gfxDestroyImage(&pResource->multisampled);
+        }
         GFX_FREE(pResource->pName);
         GFX_FREE(pResource);
     }
@@ -6149,10 +6162,26 @@ static GfxGraphResource* addGraphResource(GfxRenderGraph* pGraph, const char* pN
 }
 
 // Create, or recreate, the image of a resource at its size or the swapchain's
+static VkSampleCountFlagBits graphImageSamples(const GfxGraphResource* pResource)
+{
+    return pResource->desc.samples ? pResource->desc.samples : VK_SAMPLE_COUNT_1_BIT;
+}
+
+// A multisampled color image is rendered to on the side and resolved into the
+// image itself, while a multisampled depth image is rendered to directly
+static bool isResolvedImage(const GfxGraphResource* pResource)
+{
+    return !pResource->pBuffer && graphImageSamples(pResource) != VK_SAMPLE_COUNT_1_BIT &&
+           !isDepthFormat(pResource->desc.format);
+}
+
 static void createGraphImage(GfxGraphResource* pResource)
 {
     if (pResource->image.image) {
         gfxDestroyImage(&pResource->image);
+    }
+    if (pResource->multisampled.image) {
+        gfxDestroyImage(&pResource->multisampled);
     }
 
     VkExtent3D extent = {
@@ -6161,11 +6190,22 @@ static void createGraphImage(GfxGraphResource* pResource)
         .depth = 1,
     };
 
-    gfxCreateImage(extent, 1, 1, VK_SAMPLE_COUNT_1_BIT, pResource->desc.format, VK_IMAGE_TILING_OPTIMAL,
-                   pResource->desc.usage, 0, VK_IMAGE_TYPE_2D, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pResource->image);
-    gfxCreateImageView(&pResource->image,
-                       isDepthFormat(pResource->desc.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
-                       VK_IMAGE_VIEW_TYPE_2D);
+    VkFormat format = pResource->desc.format;
+    VkImageAspectFlags aspect = isDepthFormat(format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+
+    // Only the multisampled image of a resolved image has more than one sample
+    VkSampleCountFlagBits samples = isResolvedImage(pResource) ? VK_SAMPLE_COUNT_1_BIT : graphImageSamples(pResource);
+    gfxCreateImage(extent, 1, 1, samples, format, VK_IMAGE_TILING_OPTIMAL, pResource->desc.usage, 0, VK_IMAGE_TYPE_2D,
+                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pResource->image);
+    gfxCreateImageView(&pResource->image, aspect, VK_IMAGE_VIEW_TYPE_2D);
+
+    // It is never read, only rendered to and resolved
+    if (isResolvedImage(pResource)) {
+        gfxCreateImage(extent, 1, 1, graphImageSamples(pResource), format, VK_IMAGE_TILING_OPTIMAL,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, VK_IMAGE_TYPE_2D, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                       &pResource->multisampled);
+        gfxCreateImageView(&pResource->multisampled, aspect, VK_IMAGE_VIEW_TYPE_2D);
+    }
 
     pResource->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     pResource->written = false;
@@ -6176,6 +6216,24 @@ GfxImage* gfxAddGraphImage(GfxRenderGraph* pGraph, const GfxGraphImageDesc* pDes
     if ((!pDesc->width || !pDesc->height) && !gfxSwapchain.swapchain) {
         GFX_ERROR("Image '%s' follows the swapchain size, so the swapchain has to be created first", pDesc->pName);
         return NULL;
+    }
+
+    if (pDesc->samples > VK_SAMPLE_COUNT_1_BIT) {
+        const VkPhysicalDeviceLimits* pLimits = &gfxDevice.properties.physicalDevice.limits;
+        VkSampleCountFlags supported = isDepthFormat(pDesc->format) ? pLimits->framebufferDepthSampleCounts
+                                                                    : pLimits->framebufferColorSampleCounts;
+        if (!(supported & pDesc->samples)) {
+            GFX_ERROR("Image '%s' asks for %d samples, which the device does not support for it", pDesc->pName,
+                      (int)pDesc->samples);
+            return NULL;
+        }
+
+        if (!isDepthFormat(pDesc->format) && !(pDesc->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) {
+            GFX_ERROR("Multisampled image '%s' is resolved into as an attachment, so it needs "
+                      "VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT",
+                      pDesc->pName);
+            return NULL;
+        }
     }
 
     GfxGraphResource* pResource = addGraphResource(pGraph, pDesc->pName);
@@ -6267,12 +6325,20 @@ static bool buildGraphPassAttachments(GfxRenderGraph* pGraph)
         pPass->pColorImages = allocZeroed(GFX_MAX_PASS_RESOURCES, sizeof *pPass->pColorImages);
         pPass->hasDepth = false;
         uint32_t colorCount = 0;
+        VkSampleCountFlagBits samples = 0;
 
         for (uint32_t j = 0; j < pPass->outputCount; j++) {
             const GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
             if (!isAttachmentImage(pResource)) {
                 continue;
             }
+
+            if (samples && graphImageSamples(pResource) != samples) {
+                GFX_ERROR("The attachments of pass '%s' have different sample counts, '%s' has %d", pPass->pName,
+                          pResource->pName, (int)graphImageSamples(pResource));
+                return false;
+            }
+            samples = graphImageSamples(pResource);
 
             if (isDepthFormat(pResource->desc.format)) {
                 if (pPass->hasDepth) {
@@ -6282,7 +6348,9 @@ static bool buildGraphPassAttachments(GfxRenderGraph* pGraph)
                 pPass->depthImage = pResource->image;
                 pPass->hasDepth = true;
             } else {
-                pPass->pColorImages[colorCount++] = pResource->image;
+                // A multisampled image is rendered to on the side
+                pPass->pColorImages[colorCount++] =
+                    isResolvedImage(pResource) ? pResource->multisampled : pResource->image;
             }
         }
 
@@ -6294,6 +6362,25 @@ static bool buildGraphPassAttachments(GfxRenderGraph* pGraph)
 
         gfxCreateAttachment(colorCount, pPass->pColorImages, pPass->hasDepth ? &pPass->depthImage : NULL, NULL,
                             &pPass->attachment);
+
+        // Every multisampled color attachment resolves into its own image. The
+        // multisampled contents are not needed after that, so they are not
+        // stored.
+        uint32_t color = 0;
+        for (uint32_t j = 0; j < pPass->outputCount; j++) {
+            const GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
+            if (!isAttachmentImage(pResource) || isDepthFormat(pResource->desc.format)) {
+                continue;
+            }
+
+            VkRenderingAttachmentInfo* pInfo = &pPass->attachment.pRenderingAttachmentInfos[color++];
+            if (isResolvedImage(pResource)) {
+                pInfo->resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+                pInfo->resolveImageView = pResource->image.imageView;
+                pInfo->resolveImageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                pInfo->storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            }
+        }
     }
 
     return true;
@@ -6535,6 +6622,18 @@ void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph)
         for (uint32_t j = 0; j < pPass->outputCount; j++) {
             GfxGraphResource* pResource = pGraph->ppResources[pPass->outputs[j]];
             transitionGraphResource(cmd, pResource, graphWriteLayout(pPass, pResource), true);
+
+            // The image itself is written by the resolve, as an attachment. The
+            // multisampled image is cleared and rendered from scratch, so its
+            // contents are discarded, but the previous frame's rendering to it
+            // has to finish first.
+            if (pPass->type == GFX_PASS_GRAPHICS && isResolvedImage(pResource)) {
+                gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                pResource->multisampled.image, NULL);
+            }
         }
 
         if (pPass->type == GFX_PASS_GRAPHICS) {
