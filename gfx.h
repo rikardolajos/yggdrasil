@@ -488,6 +488,7 @@ typedef struct GfxShaderBinding {
     const GfxTexture* pTextures; // count textures
     const GfxImage* pImage;
     VkImageLayout imageLayout;
+    VkSampler sampler; // Combined with pImage
     const GfxAccelerationStructure* pAccelerationStructure;
 
     bool reported; // Whether a missing resource has been reported
@@ -609,7 +610,8 @@ typedef struct GfxGraphImageDesc {
 } GfxGraphImageDesc;
 
 // A graphics pass renders to the color and depth attachments among its outputs,
-// a compute pass dispatches or traces rays and writes its outputs as storage
+// which can be a depth image alone, as for a shadow map. A compute pass
+// dispatches or traces rays and writes its outputs as storage.
 enum GfxPassType {
     GFX_PASS_GRAPHICS,
     GFX_PASS_COMPUTE,
@@ -927,6 +929,27 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 #endif
 
 /// <summary>
+/// Create a sampler, for sampling images that are not textures, such as the
+/// images of a render graph. A comparing sampler is meant for shadow maps
+/// sampled with sampler2DShadow: it returns 1 where the reference depth is
+/// nearer than, or as near as, the depth stored, following GFX_REVERSE_Z, and
+/// its border is at the far depth, so lookups outside a clamped shadow map are
+/// lit. Release it with gfxDestroySampler().
+/// </summary>
+/// <param name="filter">Magnification and minification filter, linear filtering of a comparing sampler gives
+/// smoothed shadow edges</param>
+/// <param name="addressMode">Address mode in all directions</param>
+/// <param name="compare">Whether the sampler compares against a reference depth</param>
+/// <returns>The sampler</returns>
+VkSampler gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare);
+
+/// <summary>
+/// Release a sampler created with gfxCreateSampler().
+/// </summary>
+/// <param name="sampler">Sampler to destroy</param>
+void gfxDestroySampler(VkSampler sampler);
+
+/// <summary>
 /// Release resources for a texture.
 /// </summary>
 /// <param name="pTexture">Texture to destroy</param>
@@ -1098,6 +1121,20 @@ void gfxSetShaderTextureArray(GfxShader* pShader, const char* pName, uint32_t te
 void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkImageLayout layout);
 
 /// <summary>
+/// Attach an image together with a sampler to a named combined image sampler
+/// in the shader, for instance a render graph's shadow map to a
+/// sampler2DShadow. The image must have an image view.
+/// </summary>
+/// <param name="pShader">Shader to use</param>
+/// <param name="pName">Variable name</param>
+/// <param name="pImage">Image to attach, must stay at the same address while attached</param>
+/// <param name="sampler">Sampler to sample it with, for instance from gfxCreateSampler()</param>
+/// <param name="layout">Layout the image is in when the shader samples it. VK_IMAGE_LAYOUT_UNDEFINED picks
+/// VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, which is what a render graph reads sampled images in.</param>
+void gfxSetShaderImageSampler(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkSampler sampler,
+                              VkImageLayout layout);
+
+/// <summary>
 /// Attach a top level acceleration structure to a named acceleration structure
 /// in the shader.
 /// </summary>
@@ -1229,7 +1266,8 @@ void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline
 
 /// <summary>
 /// Set default states for rendering using shader objects. Viewport, scissor and
-/// sample count are taken from the attachment set's first color attachment.
+/// sample count are taken from the attachment set's first color attachment, or
+/// from its depth attachment if it has no color attachments.
 /// Depth testing is enabled with GFX_DEPTH_COMPARE_OP, which follows the depth
 /// convention chosen with GFX_REVERSE_Z. Blending is disabled, but the blend
 /// equation is set to the usual alpha blending, so enabling blending with
@@ -3227,6 +3265,47 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 }
 #endif
 
+VkSampler gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare)
+{
+    VkSamplerCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = filter,
+        .minFilter = filter,
+        .mipmapMode = filter == VK_FILTER_NEAREST ? VK_SAMPLER_MIPMAP_MODE_NEAREST : VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = addressMode,
+        .addressModeV = addressMode,
+        .addressModeW = addressMode,
+        .compareEnable = compare,
+        .compareOp = VK_COMPARE_OP_ALWAYS,
+        .minLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+    };
+
+    // Lit where the reference is at least as near as what the shadow map
+    // holds, and the border is at the far depth so that it is lit too
+    if (compare) {
+#ifdef GFX_REVERSE_Z
+        ci.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+        ci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+#else
+        ci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        ci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+#endif
+    }
+
+    VkSampler sampler;
+    VK_CHECK(vkCreateSampler(gfxDevice.device, &ci, NULL, &sampler));
+    return sampler;
+}
+
+void gfxDestroySampler(VkSampler sampler)
+{
+    vkDeviceWaitIdle(gfxDevice.device);
+    vkDestroySampler(gfxDevice.device, sampler, NULL);
+    gfxDevice.resourceGeneration++;
+}
+
 void gfxDestroyTexture(GfxTexture* pTexture)
 {
     vkDeviceWaitIdle(gfxDevice.device);
@@ -3266,9 +3345,11 @@ void gfxSetTextureAddressMode(GfxTexture* pTexture, VkSamplerAddressMode modeU, 
 static void createAttachmentSet(GfxAttachment* pAttachmentSet, uint32_t colorAttachmentCount,
                                 GfxImage* pColorAttachments, GfxImage* pDepthAttachment, GfxImage* pResolveAttachment)
 {
+    // A depth-only set has no color attachments, but the arrays are still
+    // allocated so that they can be freed like any other
     *pAttachmentSet = (GfxAttachment){
-        .pRenderingAttachmentInfos = GFX_MALLOC(colorAttachmentCount * sizeof(VkRenderingAttachmentInfo)),
-        .pFormats = GFX_MALLOC(colorAttachmentCount * sizeof(VkFormat)),
+        .pRenderingAttachmentInfos = GFX_MALLOC(GFX_MAX(colorAttachmentCount, 1) * sizeof(VkRenderingAttachmentInfo)),
+        .pFormats = GFX_MALLOC(GFX_MAX(colorAttachmentCount, 1) * sizeof(VkFormat)),
         .pColorAttachments = pColorAttachments,
         .colorAttachmentCount = colorAttachmentCount,
         .pDepthAttachment = pDepthAttachment,
@@ -3340,6 +3421,16 @@ static VkImageLayout depthAttachmentLayout(VkFormat format)
                               : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
 }
 
+// The image that decides the size and sample count of an attachment set: the
+// first color attachment, or the depth attachment of a depth-only set
+static const GfxImage* attachmentSetImage(const GfxAttachment* pAttachmentSet)
+{
+    if (pAttachmentSet->colorAttachmentCount) {
+        return &pAttachmentSet->pColorAttachments[0];
+    }
+    return pAttachmentSet->pDepthAttachment;
+}
+
 // Begin rendering with the clear values and load operations already in the
 // attachment set
 static void beginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
@@ -3356,9 +3447,15 @@ static void beginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment
         };
     }
 
+    const GfxImage* pImage = attachmentSetImage(pAttachmentSet);
+    if (!pImage) {
+        GFX_ERROR("An attachment set needs a color or a depth attachment to render to");
+        return;
+    }
+
     VkExtent2D extent = {
-        .width = pAttachmentSet->pColorAttachments[0].width,
-        .height = pAttachmentSet->pColorAttachments[0].height,
+        .width = pImage->width,
+        .height = pImage->height,
     };
 
     VkRenderingInfo renderingInfo = {
@@ -4816,6 +4913,7 @@ bool gfxReloadShader(GfxShader* pShader)
         pNew->pTextures = pOld->pTextures;
         pNew->pImage = pOld->pImage;
         pNew->imageLayout = pOld->imageLayout;
+        pNew->sampler = pOld->sampler;
         pNew->pAccelerationStructure = pOld->pAccelerationStructure;
     }
 
@@ -4851,6 +4949,7 @@ static GfxShaderBinding* resolveBinding(GfxShader* pShader, const char* pName, c
             pBinding->pBuffer = NULL;
             pBinding->pTextures = NULL;
             pBinding->pImage = NULL;
+            pBinding->sampler = VK_NULL_HANDLE;
             pBinding->pAccelerationStructure = NULL;
             return pBinding;
         }
@@ -4916,6 +5015,26 @@ void gfxSetShaderTextureArray(GfxShader* pShader, const char* pName, uint32_t te
     }
 
     pBinding->pTextures = pTextures;
+}
+
+void gfxSetShaderImageSampler(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkSampler sampler,
+                              VkImageLayout layout)
+{
+    static const VkDescriptorType allowed[] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER};
+
+    GfxShaderBinding* pBinding = resolveBinding(pShader, pName, "image and sampler", allowed, GFX_ARRAY_LEN(allowed));
+    if (!pBinding) {
+        return;
+    }
+
+    if (pBinding->count != 1) {
+        GFX_ERROR("'%s' is an array of %" PRIu32 " images, which cannot be attached", pName, pBinding->count);
+        return;
+    }
+
+    pBinding->pImage = pImage;
+    pBinding->sampler = sampler;
+    pBinding->imageLayout = layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : layout;
 }
 
 void gfxSetShaderImage(GfxShader* pShader, const char* pName, const GfxImage* pImage, VkImageLayout layout)
@@ -5077,6 +5196,7 @@ static uint32_t resolveSet(GfxShader* pShader, const GfxShaderSet* pSet)
                 GFX_ERROR("The image attached to '%s' has been destroyed or has no image view", bindingName(pBinding));
                 continue;
             }
+            pImageInfos[0].sampler = pBinding->sampler;
             pImageInfos[0].imageView = pBinding->pImage->imageView;
             pImageInfos[0].imageLayout = pBinding->imageLayout;
             resolved++;
@@ -5891,17 +6011,16 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
                             uint32_t vertexAttributeDescriptionCount,
                             const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
 {
-    if (!pAttachmentSet || !pAttachmentSet->colorAttachmentCount) {
-        GFX_ERROR("An attachment set with at least one color attachment is required");
+    const GfxImage* pImage = pAttachmentSet ? attachmentSetImage(pAttachmentSet) : NULL;
+    if (!pImage) {
+        GFX_ERROR("An attachment set with a color or a depth attachment is required");
         return;
     }
 
     // Viewport and sample count follow the attachments actually being rendered
     // to, which is not necessarily the swapchain
-    const GfxImage* pFirstColorAttachment = &pAttachmentSet->pColorAttachments[0];
-    const VkExtent2D extent = {.width = pFirstColorAttachment->width, .height = pFirstColorAttachment->height};
-    const VkSampleCountFlagBits samples =
-        pFirstColorAttachment->samples ? pFirstColorAttachment->samples : VK_SAMPLE_COUNT_1_BIT;
+    const VkExtent2D extent = {.width = pImage->width, .height = pImage->height};
+    const VkSampleCountFlagBits samples = pImage->samples ? pImage->samples : VK_SAMPLE_COUNT_1_BIT;
 
     const VkViewport viewport = {
         .width = (float)extent.width,
@@ -6167,8 +6286,9 @@ static bool buildGraphPassAttachments(GfxRenderGraph* pGraph)
             }
         }
 
-        if (!colorCount) {
-            GFX_ERROR("Graphics pass '%s' writes no color attachment", pPass->pName);
+        // A pass writing only depth, such as a shadow map pass, is fine
+        if (!colorCount && !pPass->hasDepth) {
+            GFX_ERROR("Graphics pass '%s' writes no color or depth attachment", pPass->pName);
             return false;
         }
 
