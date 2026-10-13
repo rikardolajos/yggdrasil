@@ -102,7 +102,7 @@ static void createDevice(VkSurfaceKHR surface)
                                               .samplerAnisotropy = VK_TRUE,
                                           }};
 
-    gfxCreateDevice(0, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
+    gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
 }
 
 static void createOutputImage(GfxImage* pImage)

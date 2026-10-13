@@ -621,11 +621,16 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 /// </summary>
 void gfxDestroyInstance();
 
+// Pass to gfxCreateDevice() to pick the first discrete GPU, or the first
+// device if there is no discrete GPU
+#define GFX_DEFAULT_DEVICE UINT32_MAX
+
 /// <summary>
 /// Create a new device. Handle is internally managed and accessible through
-/// gfxDevice.
+/// gfxDevice. The available devices are listed with their indices when it is
+/// created.
 /// </summary>
-/// <param name="physicalDeviceIndex">Physical device index to use</param>
+/// <param name="physicalDeviceIndex">Index of the physical device to use, or GFX_DEFAULT_DEVICE</param>
 /// <param name="deviceExtensionCount">Number of device extensions</param>
 /// <param name="ppDeviceExtensions">List of device extensions to use</param>
 /// <param name="features">Pointer to features that will be put in pNext of VkDeviceCreateInfo, can be NULL</param>
@@ -1761,8 +1766,30 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     // Iterate all physical devices
     uint32_t n;
     VK_CHECK(vkEnumeratePhysicalDevices(gfxDevice.instance, &n, NULL));
+    if (!n) {
+        GFX_ERROR("No Vulkan devices available");
+        return;
+    }
+
     VkPhysicalDevice* pPhysicalDevices = GFX_MALLOC(n * sizeof *pPhysicalDevices);
     VK_CHECK(vkEnumeratePhysicalDevices(gfxDevice.instance, &n, pPhysicalDevices));
+
+    if (physicalDeviceIndex == GFX_DEFAULT_DEVICE) {
+        // Prefer the first discrete GPU, and settle for the first device
+        physicalDeviceIndex = 0;
+        for (uint32_t i = 0; i < n; i++) {
+            VkPhysicalDeviceProperties properties;
+            vkGetPhysicalDeviceProperties(pPhysicalDevices[i], &properties);
+            if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+                physicalDeviceIndex = i;
+                break;
+            }
+        }
+    } else if (physicalDeviceIndex >= n) {
+        GFX_ERROR("Device index %" PRIu32 " requested, but there are only %" PRIu32 " devices", physicalDeviceIndex, n);
+        GFX_FREE(pPhysicalDevices);
+        return;
+    }
 
     GFX_INFO("Available devices (%d):", n);
     for (uint32_t i = 0; i < n; i++) {
