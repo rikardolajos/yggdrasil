@@ -240,6 +240,7 @@ typedef struct GfxDeviceFunctions {
     PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;
     PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;
     PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;
+    PFN_vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT;
     PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
     PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
     PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
@@ -1131,7 +1132,9 @@ void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline
 /// Set default states for rendering using shader objects. Viewport, scissor and
 /// sample count are taken from the attachment set's first color attachment.
 /// Depth testing is enabled with GFX_DEPTH_COMPARE_OP, which follows the depth
-/// convention chosen with GFX_REVERSE_Z.
+/// convention chosen with GFX_REVERSE_Z. Blending is disabled, but the blend
+/// equation is set to the usual alpha blending, so enabling blending with
+/// gfxDevice.fn.vkCmdSetColorBlendEnableEXT() is enough to get it.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachmentSet">Attachment set being rendered to</param>
@@ -1867,6 +1870,7 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_LOAD_FN(vkCmdSetLogicOpEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorBlendEnableEXT);
     GFX_LOAD_FN(vkCmdSetColorWriteMaskEXT);
+    GFX_LOAD_FN(vkCmdSetColorBlendEquationEXT);
     GFX_LOAD_FN(vkCreateAccelerationStructureKHR);
     GFX_LOAD_FN(vkDestroyAccelerationStructureKHR);
     GFX_LOAD_FN(vkGetAccelerationStructureBuildSizesKHR);
@@ -5706,11 +5710,20 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
     vkCmdSetStencilTestEnable(cmd, VK_FALSE);
 
     const VkBool32 colorBlendEnable = VK_FALSE;
+    const VkColorBlendEquationEXT colorBlendEquation = {
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .colorBlendOp = VK_BLEND_OP_ADD,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+        .alphaBlendOp = VK_BLEND_OP_ADD,
+    };
     const VkColorComponentFlags colorComponents =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     gfxDevice.fn.vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
     for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
         gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, i, 1, &colorBlendEnable);
+        gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, i, 1, &colorBlendEquation);
         gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, i, 1, &colorComponents);
     }
 }
