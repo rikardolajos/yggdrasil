@@ -232,6 +232,7 @@ int main()
 
     GfxTexture texture;
     gfxCreateTextureFromFile(GFX_TEXTURE_2D, VK_FORMAT_R8G8B8A8_UNORM, "texture.png", false, &texture);
+    gfxSetTextureMagFilter(&texture, VK_FILTER_NEAREST);
 
     GfxBuffer vertexBuffer;
     GfxBuffer indexBuffer;
