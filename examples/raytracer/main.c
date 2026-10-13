@@ -1,9 +1,13 @@
 #define GFX_USE_STB_IMAGE
+#define GFX_USE_STB_IMAGE_WRITE
 #define GFX_IMPLEMENTATION
 #include "gfx.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #include "vecmat.h"
 
@@ -245,6 +249,7 @@ int main()
     float lightDirection[4] = {0.6f, 1.0f, 0.4f, 0.0f};
 
     bool reloadKeyDown = false;
+    bool screenshotKeyDown = false;
 
     // Seconds since last game loop
     float delta = 0.0f;
@@ -294,6 +299,13 @@ int main()
                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, outputImage.image, NULL);
 
         gfxPresent(cmd, &outputImage);
+
+        // Save the presented frame when F12 is pressed
+        bool screenshotKey = glfwGetKey(pWindow, GLFW_KEY_F12) == GLFW_PRESS;
+        if (screenshotKey && !screenshotKeyDown) {
+            gfxSaveImagePNG(&outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
+        }
+        screenshotKeyDown = screenshotKey;
 
         glfwPollEvents();
     }

@@ -53,6 +53,12 @@ extern "C" {
 #include "stb_image.h"
 #endif
 
+// Define GFX_USE_STB_IMAGE_WRITE if stb_image_write.h is available. This allows
+// for saving images to file.
+#ifdef GFX_USE_STB_IMAGE_WRITE
+#include "stb_image_write.h"
+#endif
+
 // Depth goes from 0 at the near plane to 1 at the far plane, so depth is
 // cleared to 1.0 and the smaller depth wins. Define GFX_REVERSE_Z before
 // including gfx.h to reverse this.
@@ -316,7 +322,11 @@ typedef struct GfxSwapchain {
 // to the device allocated buffer with gfxCopyBufferFromHost(). A buffer with
 // host coherent memory will always be mapped on pHostMap. When copying buffers
 // from host to device with a non-host coherent memory, a staging buffer will be
-// used. Release resources with gfxDestroyBuffer().
+// used. Data that changes every frame belongs in a per-frame buffer, created
+// with gfxCreatePerFrameBuffer(), which holds one copy per frame in flight.
+// Write this frame's copy through gfxGetPerFrameData(); shaders the buffer is
+// attached to read the copy of the frame they are recorded in. Release
+// resources with gfxDestroyBuffer().
 typedef struct GfxBuffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
@@ -324,6 +334,9 @@ typedef struct GfxBuffer {
     VkMemoryPropertyFlags properties;
     VkDeviceSize size;
     void* pHostMap;
+    uint32_t frameCount;      // Number of per-frame copies, 0 for an ordinary buffer
+    VkDeviceSize frameSize;   // Size of one per-frame copy
+    VkDeviceSize frameStride; // Distance between per-frame copies
 } GfxBuffer;
 
 // Image abstracts a Vulkan image, image view and memory allocation. Use
@@ -697,6 +710,33 @@ void gfxDestroyBuffer(GfxBuffer* pBuffer);
 void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset);
 
 /// <summary>
+/// Create a buffer for data that changes every frame. It holds one copy per
+/// frame in flight in host coherent memory, so the swapchain has to be created
+/// first. Without a swapchain it holds a single copy.
+/// </summary>
+/// <param name="size">Size of one copy in bytes</param>
+/// <param name="usage">How the buffer will be used</param>
+/// <param name="pBuffer">Where the created buffer will be stored</param>
+void gfxCreatePerFrameBuffer(VkDeviceSize size, VkBufferUsageFlags usage, GfxBuffer* pBuffer);
+
+/// <summary>
+/// Get the copy of a per-frame buffer that belongs to the frame being
+/// recorded. Once gfxWaitForFence() or gfxAcquireNextImage() has returned, the
+/// device no longer reads it, so it can be written freely.
+/// </summary>
+/// <param name="pBuffer">Per-frame buffer to use</param>
+/// <returns>Host pointer to this frame's copy</returns>
+void* gfxGetPerFrameData(const GfxBuffer* pBuffer);
+
+/// <summary>
+/// Get the offset of this frame's copy of a per-frame buffer, for binding it
+/// as for instance a vertex buffer. Ordinary buffers have offset 0.
+/// </summary>
+/// <param name="pBuffer">Buffer to use</param>
+/// <returns>Offset in bytes</returns>
+VkDeviceSize gfxGetPerFrameOffset(const GfxBuffer* pBuffer);
+
+/// <summary>
 /// Get the device address of a buffer. The buffer must have been created with
 /// VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT.
 /// </summary>
@@ -737,6 +777,27 @@ void gfxDestroyImage(GfxImage* pImage);
 void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImageViewType viewType);
 
 /// <summary>
+/// Copy the first mip level and array layer of an image to host memory. The
+/// copy is submitted and waited for, after all work submitted before it.
+/// </summary>
+/// <param name="pImage">Image to copy</param>
+/// <param name="layout">Layout the image is in, which it is left in</param>
+/// <param name="pData">Where to copy to, width * height * depth * gfxFormatSize(format) bytes</param>
+void gfxCopyImageToHost(const GfxImage* pImage, VkImageLayout layout, void* pData);
+
+#ifdef GFX_USE_STB_IMAGE_WRITE
+/// <summary>
+/// Save an image to a PNG file, for instance to take a screenshot of what is
+/// presented. The image must have an 8 bit RGBA or BGRA format.
+/// </summary>
+/// <param name="pImage">Image to save</param>
+/// <param name="layout">Layout the image is in, which it is left in</param>
+/// <param name="pPath">Path of the PNG file to write</param>
+/// <returns>True if the file was written</returns>
+bool gfxSaveImagePNG(const GfxImage* pImage, VkImageLayout layout, const char* pPath);
+#endif
+
+/// <summary>
 /// Create a new texture. For a cube map, pData holds the six faces in the order
 /// +X, -X, +Y, -Y, +Z, -Z.
 /// </summary>
@@ -744,18 +805,20 @@ void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImag
 /// <param name="format">Format to use</param>
 /// <param name="pData">Pointer to data with texture pixel values, can be NULL</param>
 /// <param name="extent">Size of the texture. Height must be 1 for 1D, depth must be 1 for anything but 3D</param>
-/// <param name="channels">Number of channels in texture</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
 /// <param name="pTexture">Where the created texture will be stored</param>
 void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, VkExtent3D extent,
-                      uint32_t channels, bool generateMipmaps, GfxTexture* pTexture);
+                      bool generateMipmaps, GfxTexture* pTexture);
 
 #ifdef GFX_USE_STB_IMAGE
 /// <summary>
-/// Create a new texture from file. Only GFX_TEXTURE_2D is supported.
+/// Create a new texture from file. Only GFX_TEXTURE_2D is supported. The file
+/// is loaded with four channels, as 8 bit for VK_FORMAT_R8G8B8A8_UNORM and
+/// VK_FORMAT_R8G8B8A8_SRGB, 16 bit for VK_FORMAT_R16G16B16A16_UNORM and as
+/// floats for VK_FORMAT_R32G32B32A32_SFLOAT, which also loads HDR files.
 /// </summary>
 /// <param name="type">Type of texture to create, must be GFX_TEXTURE_2D</param>
-/// <param name="format">Format to use</param>
+/// <param name="format">Format to use, one of the above</param>
 /// <param name="pPath">Path to texture file</param>
 /// <param name="generateMipmaps">Whether to generate mipmaps or not</param>
 /// <param name="pTexture">Where the created texture will be stored</param>
@@ -973,6 +1036,18 @@ void gfxCmdBindResources(VkCommandBuffer cmd, GfxShader* pShader);
 /// <param name="pData">Data to push</param>
 void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t offset, uint32_t size,
                          const void* pData);
+
+/// <summary>
+/// Dispatch a compute shader over a number of work items. The counts are
+/// rounded up to whole workgroups of the shader's reflected local size, so the
+/// shader has to ignore invocations beyond the work items.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pShader">Bound compute shader</param>
+/// <param name="x">Number of work items in x</param>
+/// <param name="y">Number of work items in y</param>
+/// <param name="z">Number of work items in z</param>
+void gfxCmdDispatch(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t x, uint32_t y, uint32_t z);
 
 /// <summary>
 /// Create a bottom level acceleration structure from triangle geometry. The
@@ -1227,6 +1302,79 @@ static inline VkFormat gfxFindDepthFormat()
 
     return gfxFindSupportedFormat(candidates, GFX_ARRAY_LEN(candidates), VK_IMAGE_TILING_OPTIMAL,
                                   VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+}
+
+/// <summary>
+/// Get the size of one texel of an uncompressed format.
+/// </summary>
+/// <param name="format">Format to use</param>
+/// <returns>Size in bytes, or 0 for compressed, multi-planar and combined depth stencil formats</returns>
+static inline uint32_t gfxFormatSize(VkFormat format)
+{
+    // Core formats of the same texel size are numbered consecutively
+    struct GfxFormatRange {
+        VkFormat first;
+        VkFormat last;
+        uint32_t size;
+    } ranges[] = {
+        {VK_FORMAT_R4G4_UNORM_PACK8, VK_FORMAT_R4G4_UNORM_PACK8, 1},
+        {VK_FORMAT_R4G4B4A4_UNORM_PACK16, VK_FORMAT_A1R5G5B5_UNORM_PACK16, 2},
+        {VK_FORMAT_R8_UNORM, VK_FORMAT_R8_SRGB, 1},
+        {VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_SRGB, 2},
+        {VK_FORMAT_R8G8B8_UNORM, VK_FORMAT_B8G8R8_SRGB, 3},
+        {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_A2B10G10R10_SINT_PACK32, 4},
+        {VK_FORMAT_R16_UNORM, VK_FORMAT_R16_SFLOAT, 2},
+        {VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16_SFLOAT, 4},
+        {VK_FORMAT_R16G16B16_UNORM, VK_FORMAT_R16G16B16_SFLOAT, 6},
+        {VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT, 8},
+        {VK_FORMAT_R32_UINT, VK_FORMAT_R32_SFLOAT, 4},
+        {VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_SFLOAT, 8},
+        {VK_FORMAT_R32G32B32_UINT, VK_FORMAT_R32G32B32_SFLOAT, 12},
+        {VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_SFLOAT, 16},
+        {VK_FORMAT_R64_UINT, VK_FORMAT_R64_SFLOAT, 8},
+        {VK_FORMAT_R64G64_UINT, VK_FORMAT_R64G64_SFLOAT, 16},
+        {VK_FORMAT_R64G64B64_UINT, VK_FORMAT_R64G64B64_SFLOAT, 24},
+        {VK_FORMAT_R64G64B64A64_UINT, VK_FORMAT_R64G64B64A64_SFLOAT, 32},
+        {VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32, 4},
+        {VK_FORMAT_D16_UNORM, VK_FORMAT_D16_UNORM, 2},
+        {VK_FORMAT_X8_D24_UNORM_PACK32, VK_FORMAT_D32_SFLOAT, 4},
+        {VK_FORMAT_S8_UINT, VK_FORMAT_S8_UINT, 1},
+    };
+
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(ranges); i++) {
+        if (format >= ranges[i].first && format <= ranges[i].last) {
+            return ranges[i].size;
+        }
+    }
+    return 0;
+}
+
+/// <summary>
+/// Create a global memory barrier.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="srcStage">Stage to wait for</param>
+/// <param name="srcAccess">Type of access to wait for</param>
+/// <param name="dstStage">Stage before which the barrier has to take place</param>
+/// <param name="dstAccess">Type of access before which the barrier has to take place</param>
+static inline void gfxMemoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                                    VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+{
+    VkMemoryBarrier2 barrier = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = srcStage,
+        .srcAccessMask = srcAccess,
+        .dstStageMask = dstStage,
+        .dstAccessMask = dstAccess,
+    };
+
+    VkDependencyInfo dependencyInfo = {
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .memoryBarrierCount = 1,
+        .pMemoryBarriers = &barrier,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
 }
 
 /// <summary>
@@ -1848,19 +1996,23 @@ static VkSurfaceFormatKHR chooseSurfaceFormat(uint32_t availableFormatsCount,
     return availableFormats[0];
 }
 
-// Iterate through available present modes and see if a no v-sync mode is
-// available, otherwise go for VK_PRESENT_MODE_FIFO_KHR. If vsync is requested,
-// just go for VK_PRESENT_MODE_FIFO_KHR.
+// Vertical synchronization uses VK_PRESENT_MODE_FIFO_KHR, which is the only
+// mode that is always available. Without it, VK_PRESENT_MODE_IMMEDIATE_KHR is
+// preferred, then VK_PRESENT_MODE_MAILBOX_KHR, which at least does not wait for
+// vertical blank, and FIFO as a last resort.
 static VkPresentModeKHR choosePresentMode(uint32_t availablePresentModeCount,
                                           const VkPresentModeKHR* availablePresentModes, bool vsync)
 {
     if (vsync) {
-        return VK_PRESENT_MODE_MAILBOX_KHR;
+        return VK_PRESENT_MODE_FIFO_KHR;
     }
 
-    for (uint32_t i = 0; i < availablePresentModeCount; i++) {
-        if (availablePresentModes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-            return availablePresentModes[i];
+    const VkPresentModeKHR preferred[] = {VK_PRESENT_MODE_IMMEDIATE_KHR, VK_PRESENT_MODE_MAILBOX_KHR};
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(preferred); i++) {
+        for (uint32_t j = 0; j < availablePresentModeCount; j++) {
+            if (availablePresentModes[j] == preferred[i]) {
+                return preferred[i];
+            }
         }
     }
 
@@ -2349,6 +2501,37 @@ VkDeviceAddress gfxGetBufferDeviceAddress(const GfxBuffer* pBuffer)
     return vkGetBufferDeviceAddress(gfxDevice.device, &info);
 }
 
+void gfxCreatePerFrameBuffer(VkDeviceSize size, VkBufferUsageFlags usage, GfxBuffer* pBuffer)
+{
+    // Every copy has to be usable as the offset of a buffer descriptor
+    const VkPhysicalDeviceLimits* pLimits = &gfxDevice.properties.physicalDevice.limits;
+    VkDeviceSize alignment =
+        GFX_MAX(GFX_MAX(pLimits->minUniformBufferOffsetAlignment, pLimits->minStorageBufferOffsetAlignment), 16);
+
+    uint32_t frameCount = GFX_MAX(gfxSwapchain.framesInFlight, 1);
+    VkDeviceSize stride = gfxAlignTo(size, alignment);
+
+    gfxCreateBuffer(stride * frameCount, usage,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, pBuffer);
+
+    pBuffer->frameCount = frameCount;
+    pBuffer->frameSize = size;
+    pBuffer->frameStride = stride;
+}
+
+VkDeviceSize gfxGetPerFrameOffset(const GfxBuffer* pBuffer)
+{
+    if (!pBuffer->frameCount) {
+        return 0;
+    }
+    return (gfxSwapchain.inFlightIndex % pBuffer->frameCount) * pBuffer->frameStride;
+}
+
+void* gfxGetPerFrameData(const GfxBuffer* pBuffer)
+{
+    return (char*)pBuffer->pHostMap + gfxGetPerFrameOffset(pBuffer);
+}
+
 void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels, VkSampleCountFlagBits samples,
                     VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
                     VkImageType imageType, VkMemoryPropertyFlags properties, GfxImage* pImage)
@@ -2439,6 +2622,110 @@ void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImag
     VK_CHECK(vkCreateImageView(gfxDevice.device, &ci, NULL, &pImage->imageView));
 }
 
+void gfxCopyImageToHost(const GfxImage* pImage, VkImageLayout layout, void* pData)
+{
+    uint32_t texelSize = gfxFormatSize(pImage->format);
+    if (!texelSize) {
+        GFX_ERROR("Only images with uncompressed formats can be copied to host memory");
+        return;
+    }
+
+    if (layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        GFX_ERROR("An image in VK_IMAGE_LAYOUT_UNDEFINED has no contents to copy");
+        return;
+    }
+
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (pImage->format == VK_FORMAT_D16_UNORM || pImage->format == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+        pImage->format == VK_FORMAT_D32_SFLOAT) {
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    } else if (pImage->format == VK_FORMAT_S8_UINT) {
+        aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+    }
+
+    VkDeviceSize size = (VkDeviceSize)pImage->width * pImage->height * pImage->depth * texelSize;
+
+    GfxBuffer staging;
+    gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging);
+
+    VkImageSubresourceRange range = {
+        .aspectMask = aspect,
+        .levelCount = 1,
+        .layerCount = 1,
+    };
+
+    // Copies can read from the general layout, any other layout is changed for
+    // the copy and back again
+    VkImageLayout copyLayout =
+        layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkCommandBuffer cmd = gfxCmdBegin();
+
+    // Wait for everything submitted before, which may write the image
+    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, layout, copyLayout, pImage->image,
+                    &range);
+
+    VkBufferImageCopy region = {
+        .imageSubresource = {.aspectMask = aspect, .mipLevel = 0, .baseArrayLayer = 0, .layerCount = 1},
+        .imageExtent = {.width = pImage->width, .height = pImage->height, .depth = pImage->depth},
+    };
+    vkCmdCopyImageToBuffer(cmd, pImage->image, copyLayout, staging.buffer, 1, &region);
+
+    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    VK_ACCESS_2_NONE, copyLayout, layout, pImage->image, &range);
+
+    gfxCmdEnd(cmd);
+
+    memcpy(pData, staging.pHostMap, size);
+
+    gfxDestroyBuffer(&staging);
+}
+
+#ifdef GFX_USE_STB_IMAGE_WRITE
+bool gfxSaveImagePNG(const GfxImage* pImage, VkImageLayout layout, const char* pPath)
+{
+    bool bgra;
+    switch (pImage->format) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        bgra = false;
+        break;
+    case VK_FORMAT_B8G8R8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        bgra = true;
+        break;
+    default:
+        GFX_WARNING("Only images with 8 bit RGBA or BGRA formats can be saved as PNG");
+        return false;
+    }
+
+    size_t pixelCount = (size_t)pImage->width * pImage->height;
+    uint8_t* pPixels = GFX_MALLOC(pixelCount * 4);
+    gfxCopyImageToHost(pImage, layout, pPixels);
+
+    if (bgra) {
+        for (size_t i = 0; i < pixelCount; i++) {
+            uint8_t blue = pPixels[4 * i + 0];
+            pPixels[4 * i + 0] = pPixels[4 * i + 2];
+            pPixels[4 * i + 2] = blue;
+        }
+    }
+
+    bool saved = stbi_write_png(pPath, (int)pImage->width, (int)pImage->height, 4, pPixels, (int)pImage->width * 4);
+
+    GFX_FREE(pPixels);
+
+    if (saved) {
+        GFX_INFO("Saved image to %s", pPath);
+    } else {
+        GFX_WARNING("Failed to save image to %s", pPath);
+    }
+    return saved;
+}
+#endif
+
 static void generateMipmaps(GfxTexture* pTexture)
 {
     VkFormatProperties props;
@@ -2525,7 +2812,7 @@ static void generateMipmaps(GfxTexture* pTexture)
 }
 
 static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkFormat format, const void* pData,
-                          VkExtent3D extent, uint32_t channels, bool mipmaps)
+                          VkExtent3D extent, bool mipmaps)
 {
     VkImageType imageType;
     VkImageViewType viewType;
@@ -2579,9 +2866,14 @@ static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkForm
                    flags, imageType, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &pTexture->image);
 
     if (pData) {
-        // Widen before multiplying, so large textures do not overflow. Note
-        // that this assumes one byte per channel.
-        VkDeviceSize size = (VkDeviceSize)extent.width * extent.height * extent.depth * arrayLayers * channels;
+        uint32_t texelSize = gfxFormatSize(format);
+        if (!texelSize) {
+            GFX_ERROR("Texture data can only be uploaded for uncompressed formats");
+            return;
+        }
+
+        // Widen before multiplying, so large textures do not overflow
+        VkDeviceSize size = (VkDeviceSize)extent.width * extent.height * extent.depth * arrayLayers * texelSize;
 
         GfxBuffer staging;
         gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -2675,11 +2967,11 @@ static void createSampler(GfxTexture* pTexture)
 }
 
 void gfxCreateTexture(enum GfxTextureType type, VkFormat format, const void* pData, VkExtent3D extent,
-                      uint32_t channels, bool generateMipmaps, GfxTexture* pTexture)
+                      bool generateMipmaps, GfxTexture* pTexture)
 {
     GFX_RESET(pTexture);
 
-    createTexture(pTexture, type, format, pData, extent, channels, generateMipmaps);
+    createTexture(pTexture, type, format, pData, extent, generateMipmaps);
     createSampler(pTexture);
 }
 
@@ -2699,17 +2991,33 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
     stbi_set_flip_vertically_on_load(1);
 
     int width, height, channels;
+    void* pData = NULL;
 
-    stbi_uc* pData = stbi_load(pPath, &width, &height, &channels, STBI_rgb_alpha);
-    channels = STBI_rgb_alpha;
+    // The file is converted to four channels of what the format holds
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        pData = stbi_load(pPath, &width, &height, &channels, STBI_rgb_alpha);
+        break;
+    case VK_FORMAT_R16G16B16A16_UNORM:
+        pData = stbi_load_16(pPath, &width, &height, &channels, STBI_rgb_alpha);
+        break;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+        pData = stbi_loadf(pPath, &width, &height, &channels, STBI_rgb_alpha);
+        break;
+    default:
+        GFX_ERROR("Textures can only be loaded from file as VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, "
+                  "VK_FORMAT_R16G16B16A16_UNORM or VK_FORMAT_R32G32B32A32_SFLOAT");
+        return;
+    }
 
     if (!pData) {
-        GFX_ERROR("Failed to load texture.");
+        GFX_ERROR("Failed to load texture %s: %s", pPath, stbi_failure_reason());
         return;
     }
 
     VkExtent3D extent = {.width = (uint32_t)width, .height = (uint32_t)height, .depth = 1};
-    createTexture(pTexture, type, format, pData, extent, channels, generateMipmaps);
+    createTexture(pTexture, type, format, pData, extent, generateMipmaps);
 
     stbi_image_free(pData);
 
@@ -4500,13 +4808,22 @@ static uint32_t resolveSet(GfxShader* pShader, const GfxShaderSet* pSet)
         VkDescriptorImageInfo* pImageInfos = &pShader->pResolvedImageInfos[pBinding->infoIndex];
 
         if (pBinding->pBuffer) {
-            if (!pBinding->pBuffer->buffer) {
+            const GfxBuffer* pBuffer = pBinding->pBuffer;
+            if (!pBuffer->buffer) {
                 GFX_ERROR("The buffer attached to '%s' has been destroyed", bindingName(pBinding));
                 continue;
             }
-            pBufferInfo->buffer = pBinding->pBuffer->buffer;
+            pBufferInfo->buffer = pBuffer->buffer;
             pBufferInfo->offset = pBinding->offset;
             pBufferInfo->range = pBinding->range;
+
+            // A per-frame buffer is bound at the copy of the frame being recorded
+            if (pBuffer->frameCount) {
+                if (pBufferInfo->range == VK_WHOLE_SIZE) {
+                    pBufferInfo->range = pBuffer->frameSize - pBinding->offset;
+                }
+                pBufferInfo->offset += gfxGetPerFrameOffset(pBuffer);
+            }
             resolved++;
         } else if (pBinding->pTextures) {
             bool valid = true;
@@ -4743,27 +5060,21 @@ void gfxCmdPushConstants(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t
     vkCmdPushConstants(cmd, pShader->pipelineLayout, pShader->pushConstantRange.stageFlags, offset, size, pData);
 }
 
-// Acceleration structures //
-
-static void memoryBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-                          VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+void gfxCmdDispatch(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t x, uint32_t y, uint32_t z)
 {
-    VkMemoryBarrier2 barrier = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-        .srcStageMask = srcStage,
-        .srcAccessMask = srcAccess,
-        .dstStageMask = dstStage,
-        .dstAccessMask = dstAccess,
-    };
+    if (!(pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        GFX_ERROR("%s is not a compute shader", shaderName(pShader));
+        return;
+    }
 
-    VkDependencyInfo dependencyInfo = {
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .memoryBarrierCount = 1,
-        .pMemoryBarriers = &barrier,
-    };
-
-    vkCmdPipelineBarrier2(cmd, &dependencyInfo);
+    // A local size that could not be reflected is taken as 1
+    uint32_t groupsX = (x + GFX_MAX(pShader->localSize[0], 1) - 1) / GFX_MAX(pShader->localSize[0], 1);
+    uint32_t groupsY = (y + GFX_MAX(pShader->localSize[1], 1) - 1) / GFX_MAX(pShader->localSize[1], 1);
+    uint32_t groupsZ = (z + GFX_MAX(pShader->localSize[2], 1) - 1) / GFX_MAX(pShader->localSize[2], 1);
+    vkCmdDispatch(cmd, groupsX, groupsY, groupsZ);
 }
+
+// Acceleration structures //
 
 // Scratch memory has to be aligned beyond what buffers are, so the buffer is
 // made larger and the address aligned up
@@ -4921,11 +5232,11 @@ static void cmdBuildTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, u
 {
     // Earlier traces may still read the structure and the instances, and an
     // earlier build may still use the scratch memory
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-                  VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                  VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
-                      VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
+    gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+                     VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                     VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                         VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR);
 
     // The instances are recorded into the command buffer, so the host never
     // writes memory that a frame in flight reads. Updates are limited to 64 kB
@@ -4937,9 +5248,9 @@ static void cmdBuildTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, u
                           (const char*)pInstances + offset);
     }
 
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                  VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
+    gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_2_SHADER_READ_BIT);
 
     VkAccelerationStructureGeometryKHR geometry = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -4969,9 +5280,9 @@ static void cmdBuildTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, u
     const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
     gfxDevice.fn.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
 
-    memoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                  VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                  VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    gfxMemoryBarrier(cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                     VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR);
 
     pTLAS->primitiveCount = instanceCount;
 }

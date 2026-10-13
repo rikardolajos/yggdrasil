@@ -1,9 +1,13 @@
 #define GFX_USE_STB_IMAGE
+#define GFX_USE_STB_IMAGE_WRITE
 #define GFX_IMPLEMENTATION
 #include "gfx.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 #include "vecmat.h"
 
@@ -212,12 +216,10 @@ int main()
 
     gfxCopyBufferFromHost(&cameraBuffer, &cameraMatrices, sizeof(CameraMatrices), 0);
 
+    // The model matrix changes every frame, so every frame in flight gets its own copy
     GfxBuffer modelBuffer;
-    gfxCreateBuffer(sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &modelBuffer);
+    gfxCreatePerFrameBuffer(sizeof(mat4), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &modelBuffer);
     float angle = 0.0f;
-    mat4* model = modelBuffer.pHostMap;
-    *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
     GfxTexture texture;
     gfxCreateTextureFromFile(GFX_TEXTURE_2D, VK_FORMAT_R8G8B8A8_UNORM, "texture.png", false, &texture);
@@ -232,6 +234,7 @@ int main()
     gfxSetShaderTexture(&shader, "diffuseTexture", &texture);
 
     bool reloadKeyDown = false;
+    bool screenshotKeyDown = false;
 
     // Seconds since last game loop
     float delta = 0.0f;
@@ -249,8 +252,9 @@ int main()
         // Wait for shared resources to be available
         gfxWaitForFence();
 
-        // Rotate model
+        // Rotate model. This frame's copy is no longer read by the device.
         angle += delta;
+        mat4* model = gfxGetPerFrameData(&modelBuffer);
         *model = mat4_trs_rotate(angle, (vec3){0.0f, 1.0f, 0.0f});
 
         // Check if swapchain has been recreated
@@ -293,6 +297,13 @@ int main()
         gfxCmdEndRendering(cmd, &attachment);
         gfxTransitionForBlitting(cmd, &colorAttachment);
         gfxPresent(cmd, &colorAttachment);
+
+        // Save the presented frame when F12 is pressed
+        bool screenshotKey = glfwGetKey(pWindow, GLFW_KEY_F12) == GLFW_PRESS;
+        if (screenshotKey && !screenshotKeyDown) {
+            gfxSaveImagePNG(&colorAttachment, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, "screenshot.png");
+        }
+        screenshotKeyDown = screenshotKey;
 
         glfwPollEvents();
     }
