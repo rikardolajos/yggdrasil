@@ -54,8 +54,6 @@ static void createWindow()
         glfwTerminate();
         GFX_ERROR("Failed to create GLFW window");
     }
-
-    glfwMakeContextCurrent(pWindow);
 }
 
 static void createInstance()
