@@ -249,6 +249,9 @@ typedef struct GfxDeviceFunctions {
     PFN_vkCreateRayTracingPipelinesKHR vkCreateRayTracingPipelinesKHR;
     PFN_vkGetRayTracingShaderGroupHandlesKHR vkGetRayTracingShaderGroupHandlesKHR;
     PFN_vkCmdTraceRaysKHR vkCmdTraceRaysKHR;
+    PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT;
+    PFN_vkCmdBeginDebugUtilsLabelEXT vkCmdBeginDebugUtilsLabelEXT;
+    PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXT;
 } GfxDeviceFunctions;
 
 // Device contains a Vulkan context for rendering. The GFX device is
@@ -271,6 +274,8 @@ typedef struct GfxDevice {
     VkShaderStageFlags graphicsShaderStages;
     bool accelerationStructures; // VK_KHR_acceleration_structure is enabled
     bool rayTracingPipelines;    // VK_KHR_ray_tracing_pipeline is enabled
+    bool debugUtils;             // VK_EXT_debug_utils is enabled
+    uint64_t timestampMask;      // Valid bits of a timestamp, 0 if the queue has no timestamps
     uint64_t frame;
     uint64_t completedFrames;
     uint64_t resourceGeneration;
@@ -694,6 +699,23 @@ typedef struct GfxRenderGraph {
     uint32_t output;  // Index of the presented image, UINT32_MAX if none
     bool compiled;
 } GfxRenderGraph;
+
+// Most GPU timers a frame can have, including the one for the whole frame
+#ifndef GFX_MAX_TIMERS
+#define GFX_MAX_TIMERS 64
+#endif
+
+#define GFX_MAX_TIMER_NAME_LENGTH 64
+
+// GPU time of a region of a frame, measured with gfxCmdBeginTimer() and
+// gfxCmdEndTimer(). Every frame has a timer named "Frame" around all of it, from
+// gfxAcquireNextImage() to gfxPresent(), and render graphs time each pass.
+// Results are read back with gfxGetTimerResults() when the frame has finished.
+typedef struct GfxTimerResult {
+    char name[GFX_MAX_TIMER_NAME_LENGTH];
+    uint32_t depth; // Number of timers it is nested in
+    double milliseconds;
+} GfxTimerResult;
 
 
 // Monolithic global variables //
@@ -1376,6 +1398,71 @@ GfxImage* gfxGetGraphImage(const GfxRenderGraph* pGraph, const char* pName);
 /// <param name="pGraph">Render graph to execute</param>
 void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph);
 
+/// <summary>
+/// Give a Vulkan object a name, which validation messages, debuggers such as
+/// RenderDoc and profilers such as Nsight show. Does nothing if VK_EXT_debug_utils
+/// is not available. Objects created by GFX from files and the images of
+/// render graphs are named already.
+/// </summary>
+/// <param name="type">Type of the object</param>
+/// <param name="handle">Handle of the object, cast to uint64_t</param>
+/// <param name="pName">Name to give it</param>
+void gfxSetDebugName(VkObjectType type, uint64_t handle, const char* pName);
+
+/// <summary>
+/// Name a buffer and its memory, see gfxSetDebugName().
+/// </summary>
+/// <param name="pBuffer">Buffer to name</param>
+/// <param name="pName">Name to give it</param>
+void gfxSetBufferName(const GfxBuffer* pBuffer, const char* pName);
+
+/// <summary>
+/// Name an image, its image view and its memory, see gfxSetDebugName().
+/// </summary>
+/// <param name="pImage">Image to name</param>
+/// <param name="pName">Name to give it</param>
+void gfxSetImageName(const GfxImage* pImage, const char* pName);
+
+/// <summary>
+/// Begin a labeled region of a command buffer, which debuggers and profilers
+/// show the commands in. Regions can be nested, and are ended with
+/// gfxCmdEndLabel(). Render graphs label each pass with its name.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="pName">Name of the region</param>
+void gfxCmdBeginLabel(VkCommandBuffer cmd, const char* pName);
+
+/// <summary>
+/// End the region begun by the last gfxCmdBeginLabel().
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+void gfxCmdEndLabel(VkCommandBuffer cmd);
+
+/// <summary>
+/// Begin measuring the GPU time of the commands that follow, in the command
+/// buffer of the frame returned by gfxAcquireNextImage(). Timers can be nested
+/// and are ended with gfxCmdEndTimer(). Does nothing if the queue does not
+/// support timestamps.
+/// </summary>
+/// <param name="cmd">Command buffer of the frame</param>
+/// <param name="pName">Name of the timer, at most GFX_MAX_TIMER_NAME_LENGTH - 1 characters are kept</param>
+void gfxCmdBeginTimer(VkCommandBuffer cmd, const char* pName);
+
+/// <summary>
+/// End the timer begun by the last gfxCmdBeginTimer().
+/// </summary>
+/// <param name="cmd">Command buffer of the frame</param>
+void gfxCmdEndTimer(VkCommandBuffer cmd);
+
+/// <summary>
+/// Get the GPU timers of the latest finished frame, which is the frame that
+/// was recorded a number of frames in flight ago. Timers are in the order they
+/// were begun, so a timer is followed by the timers nested in it.
+/// </summary>
+/// <param name="ppResults">Where a pointer to the results will be stored, valid until the next
+/// gfxAcquireNextImage()</param> <returns>Number of results, 0 before the first frame has finished</returns>
+uint32_t gfxGetTimerResults(const GfxTimerResult** ppResults);
+
 // Inlined helper functions //
 
 /// <summary>
@@ -1729,6 +1816,22 @@ gfxAccelerationStructureInstance(const GfxAccelerationStructure* pBLAS, const fl
 GfxDevice gfxDevice;
 GfxSwapchain gfxSwapchain;
 
+// GPU timers of one frame in flight. Timer i writes queries 2i and 2i + 1.
+typedef struct GfxTimerFrame {
+    VkQueryPool queryPool;
+    uint32_t count;
+    GfxTimerResult timers[GFX_MAX_TIMERS]; // Names and depths, timed when read back
+} GfxTimerFrame;
+
+static struct GfxTimers {
+    GfxTimerFrame* pFrames;         // One per frame in flight, NULL without timestamps
+    uint32_t stack[GFX_MAX_TIMERS]; // Timers begun and not ended, UINT32_MAX for ones that did not fit
+    uint32_t depth;
+    bool reported; // Whether running out of timers has been reported
+    uint32_t resultCount;
+    GfxTimerResult results[GFX_MAX_TIMERS];
+} gfxTimers;
+
 
 // Helper macros //
 
@@ -1807,9 +1910,49 @@ static void createDebugMessenger()
 }
 #endif
 
+static bool extensionInList(uint32_t extensionCount, const char** ppExtensions, const char* pName)
+{
+    for (uint32_t i = 0; i < extensionCount; i++) {
+        if (!strcmp(pName, ppExtensions[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool instanceExtensionAvailable(const char* pName)
+{
+    uint32_t n;
+    VK_CHECK(vkEnumerateInstanceExtensionProperties(NULL, &n, NULL));
+    VkExtensionProperties* pAvailable = GFX_MALLOC(n * sizeof *pAvailable);
+    VK_CHECK(vkEnumerateInstanceExtensionProperties(NULL, &n, pAvailable));
+
+    bool found = false;
+    for (uint32_t i = 0; i < n && !found; i++) {
+        found = !strcmp(pName, pAvailable[i].extensionName);
+    }
+
+    GFX_FREE(pAvailable);
+
+    return found;
+}
+
 void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions)
 {
     gfxDevice.apiVersion = apiVersion;
+
+    // VK_EXT_debug_utils names objects and regions of command buffers for
+    // debuggers and profilers, so it is enabled whenever it is available
+    const char** ppExtensions = GFX_MALLOC((instanceExtensionCount + 1) * sizeof *ppExtensions);
+    if (instanceExtensionCount) {
+        memcpy(ppExtensions, ppInstanceExtensions, instanceExtensionCount * sizeof *ppExtensions);
+    }
+    uint32_t extensionCount = instanceExtensionCount;
+    if (!extensionInList(extensionCount, ppExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) &&
+        instanceExtensionAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
+        ppExtensions[extensionCount++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    }
+    gfxDevice.debugUtils = extensionInList(extensionCount, ppExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -1821,24 +1964,19 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
     VkInstanceCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &ai,
-        .enabledExtensionCount = instanceExtensionCount,
-        .ppEnabledExtensionNames = ppInstanceExtensions,
+        .enabledExtensionCount = extensionCount,
+        .ppEnabledExtensionNames = ppExtensions,
     };
 
 #ifndef NDEBUG
     const char* layers[] = {"VK_LAYER_KHRONOS_validation"};
     ci.enabledLayerCount = GFX_ARRAY_LEN(layers);
     ci.ppEnabledLayerNames = layers;
-
-    const char** ppExpandedExtensions = GFX_MALLOC((instanceExtensionCount + 1) * sizeof *ppExpandedExtensions);
-    memcpy(ppExpandedExtensions, ppInstanceExtensions, instanceExtensionCount * sizeof *ppExpandedExtensions);
-    ppExpandedExtensions[instanceExtensionCount] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
-
-    ci.enabledExtensionCount = instanceExtensionCount + 1;
-    ci.ppEnabledExtensionNames = ppExpandedExtensions;
 #endif
 
     VK_CHECK(vkCreateInstance(&ci, NULL, &gfxDevice.instance));
+
+    GFX_FREE(ppExtensions);
 
     uint32_t version;
     VK_CHECK(vkEnumerateInstanceVersion(&version));
@@ -1846,8 +1984,10 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
              VK_API_VERSION_PATCH(version));
 
 #ifndef NDEBUG
-    createDebugMessenger();
-    GFX_FREE(ppExpandedExtensions);
+    // Validation messages are reported through the debug utils messenger
+    if (gfxDevice.debugUtils) {
+        createDebugMessenger();
+    }
 #endif
 
     // Required before any use of the glslang C interface
@@ -1858,7 +1998,9 @@ void gfxDestroyInstance()
 {
     if (gfxDevice.instance) {
 #ifndef NDEBUG
-        destroyDebugUtilsMessengerEXT(gfxDevice.instance, gfxDevice.debugMessenger, NULL);
+        if (gfxDevice.debugMessenger) {
+            destroyDebugUtilsMessengerEXT(gfxDevice.instance, gfxDevice.debugMessenger, NULL);
+        }
 #endif
         vkDestroyInstance(gfxDevice.instance, NULL);
     }
@@ -1921,16 +2063,6 @@ static bool deviceExtensionAvailable(const char* pName)
     GFX_FREE(pAvailable);
 
     return found;
-}
-
-static bool extensionInList(uint32_t extensionCount, const char** ppExtensions, const char* pName)
-{
-    for (uint32_t i = 0; i < extensionCount; i++) {
-        if (!strcmp(pName, ppExtensions[i])) {
-            return true;
-        }
-    }
-    return false;
 }
 
 static const void* findStructure(const void* pNext, VkStructureType sType)
@@ -2293,6 +2425,27 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_LOAD_FN(vkCmdTraceRaysKHR);
 #undef GFX_LOAD_FN
 
+    // Debug utils is an instance extension, so its entry points come from the
+    // instance
+    if (gfxDevice.debugUtils) {
+#define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetInstanceProcAddr(gfxDevice.instance, #name)
+        GFX_LOAD_FN(vkSetDebugUtilsObjectNameEXT);
+        GFX_LOAD_FN(vkCmdBeginDebugUtilsLabelEXT);
+        GFX_LOAD_FN(vkCmdEndDebugUtilsLabelEXT);
+#undef GFX_LOAD_FN
+    }
+
+    gfxDevice.queueFamilyIndex = queueFamilyIndex;
+
+    // Timestamps hold timestampValidBits bits, and the rest is to be ignored
+    uint32_t queueFamilyCount;
+    vkGetPhysicalDeviceQueueFamilyProperties(gfxDevice.physicalDevice, &queueFamilyCount, NULL);
+    VkQueueFamilyProperties* pQueueFamilies = GFX_MALLOC(queueFamilyCount * sizeof *pQueueFamilies);
+    vkGetPhysicalDeviceQueueFamilyProperties(gfxDevice.physicalDevice, &queueFamilyCount, pQueueFamilies);
+    uint32_t validBits = pQueueFamilies[queueFamilyIndex].timestampValidBits;
+    gfxDevice.timestampMask = validBits >= 64 ? UINT64_MAX : (1ull << validBits) - 1;
+    GFX_FREE(pQueueFamilies);
+
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -2325,6 +2478,7 @@ void gfxDestroyDevice()
     // released by gfxDestroyInstance().
     VkInstance instance = gfxDevice.instance;
     uint32_t apiVersion = gfxDevice.apiVersion;
+    bool debugUtils = gfxDevice.debugUtils;
 #ifndef NDEBUG
     VkDebugUtilsMessengerEXT debugMessenger = gfxDevice.debugMessenger;
 #endif
@@ -2333,6 +2487,7 @@ void gfxDestroyDevice()
 
     gfxDevice.instance = instance;
     gfxDevice.apiVersion = apiVersion;
+    gfxDevice.debugUtils = debugUtils;
 #ifndef NDEBUG
     gfxDevice.debugMessenger = debugMessenger;
 #endif
@@ -2514,6 +2669,11 @@ static void createSwapchain()
         };
 
         VK_CHECK(vkCreateImageView(gfxDevice.device, &ci, NULL, &gfxSwapchain.imageViews[i]));
+
+        char name[32];
+        snprintf(name, sizeof name, "Swapchain image %" PRIu32, i);
+        gfxSetDebugName(VK_OBJECT_TYPE_IMAGE, (uint64_t)gfxSwapchain.images[i], name);
+        gfxSetDebugName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)gfxSwapchain.imageViews[i], name);
     }
 }
 
@@ -2565,7 +2725,79 @@ static void createSyncObjects()
     for (uint32_t i = 0; i < gfxSwapchain.framesInFlight; i++) {
         VK_CHECK(vkCreateSemaphore(gfxDevice.device, &sci, NULL, &gfxSwapchain.inFlightSemaphores[i]));
         VK_CHECK(vkCreateFence(gfxDevice.device, &fci, NULL, &gfxSwapchain.inFlightFences[i]));
+
+        char name[32];
+        snprintf(name, sizeof name, "Frame %" PRIu32, i);
+        gfxSetDebugName(VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)(uintptr_t)gfxSwapchain.commandBuffers[i], name);
     }
+}
+
+// The timers of a frame in flight live as long as the swapchain, also when it
+// is recreated, since the number of frames in flight stays the same
+static void createTimers()
+{
+    if (!gfxDevice.timestampMask) {
+        GFX_WARNING("The queue does not support timestamps, so there are no GPU timers");
+        return;
+    }
+
+    gfxTimers.pFrames = GFX_MALLOC(gfxSwapchain.framesInFlight * sizeof *gfxTimers.pFrames);
+
+    VkQueryPoolCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = 2 * GFX_MAX_TIMERS,
+    };
+
+    for (uint32_t i = 0; i < gfxSwapchain.framesInFlight; i++) {
+        GFX_RESET(&gfxTimers.pFrames[i]);
+        VK_CHECK(vkCreateQueryPool(gfxDevice.device, &ci, NULL, &gfxTimers.pFrames[i].queryPool));
+        gfxSetDebugName(VK_OBJECT_TYPE_QUERY_POOL, (uint64_t)gfxTimers.pFrames[i].queryPool, "GPU timers");
+    }
+}
+
+static void destroyTimers()
+{
+    if (gfxTimers.pFrames) {
+        for (uint32_t i = 0; i < gfxSwapchain.framesInFlight; i++) {
+            vkDestroyQueryPool(gfxDevice.device, gfxTimers.pFrames[i].queryPool, NULL);
+        }
+        GFX_FREE(gfxTimers.pFrames);
+    }
+
+    GFX_RESET(&gfxTimers);
+}
+
+// Read back the timers of the frame in flight, whose fence has been waited on,
+// so that the frame that last used its queries has finished
+static void readTimers()
+{
+    if (!gfxTimers.pFrames) {
+        return;
+    }
+
+    GfxTimerFrame* pFrame = &gfxTimers.pFrames[gfxSwapchain.inFlightIndex];
+
+    if (pFrame->count) {
+        uint64_t timestamps[2 * GFX_MAX_TIMERS];
+        VkResult result = vkGetQueryPoolResults(gfxDevice.device, pFrame->queryPool, 0, 2 * pFrame->count,
+                                                2 * pFrame->count * sizeof *timestamps, timestamps, sizeof *timestamps,
+                                                VK_QUERY_RESULT_64_BIT);
+
+        if (result == VK_SUCCESS) {
+            // The timestamp period is in nanoseconds per tick
+            double period = gfxDevice.properties.physicalDevice.limits.timestampPeriod;
+            for (uint32_t i = 0; i < pFrame->count; i++) {
+                uint64_t ticks = (timestamps[2 * i + 1] - timestamps[2 * i]) & gfxDevice.timestampMask;
+                gfxTimers.results[i] = pFrame->timers[i];
+                gfxTimers.results[i].milliseconds = (double)ticks * period * 1e-6;
+            }
+            gfxTimers.resultCount = pFrame->count;
+        }
+    }
+
+    pFrame->count = 0;
+    gfxTimers.depth = 0;
 }
 
 static void destroySyncObjects()
@@ -2608,6 +2840,7 @@ void gfxCreateSwapchain(uint32_t framesInFlight, void (*framebufferSizeCallback)
     querySupport();
     createSwapchain();
     createSyncObjects();
+    createTimers();
 }
 
 void gfxDestroySwapchain()
@@ -2618,6 +2851,7 @@ void gfxDestroySwapchain()
 
     vkDeviceWaitIdle(gfxDevice.device);
 
+    destroyTimers();
     destroySyncObjects();
     destroySwapchain();
 
@@ -2696,6 +2930,7 @@ VkCommandBuffer gfxAcquireNextImage()
 
     // Wait for the current frame to not be in flight
     gfxWaitForFence();
+    readTimers();
     VK_CHECK(vkResetFences(gfxDevice.device, 1, &gfxSwapchain.inFlightFences[gfxSwapchain.inFlightIndex]));
 
     // Acquire index of next image in the swapchain
@@ -2717,9 +2952,15 @@ VkCommandBuffer gfxAcquireNextImage()
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
 
-    VK_CHECK(vkBeginCommandBuffer(gfxSwapchain.commandBuffers[gfxSwapchain.inFlightIndex], &bi));
+    VkCommandBuffer cmd = gfxSwapchain.commandBuffers[gfxSwapchain.inFlightIndex];
+    VK_CHECK(vkBeginCommandBuffer(cmd, &bi));
 
-    return gfxSwapchain.commandBuffers[gfxSwapchain.inFlightIndex];
+    if (gfxTimers.pFrames) {
+        vkCmdResetQueryPool(cmd, gfxTimers.pFrames[gfxSwapchain.inFlightIndex].queryPool, 0, 2 * GFX_MAX_TIMERS);
+    }
+    gfxCmdBeginTimer(cmd, "Frame");
+
+    return cmd;
 }
 
 void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
@@ -2767,6 +3008,15 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
     gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_NONE, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, gfxSwapchain.images[gfxSwapchain.imageIndex], NULL);
+
+    // Every timer has to be ended for the frame's timers to be read back, so
+    // timers left running end here, together with the frame's own
+    if (gfxTimers.depth > 1) {
+        GFX_WARNING("%" PRIu32 " GPU timers were not ended", gfxTimers.depth - 1);
+    }
+    while (gfxTimers.depth) {
+        gfxCmdEndTimer(cmd);
+    }
 
     VK_CHECK(vkEndCommandBuffer(cmd));
 
@@ -3436,6 +3686,7 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 
     VkExtent3D extent = {.width = (uint32_t)width, .height = (uint32_t)height, .depth = 1};
     createTexture(pTexture, type, format, pData, extent, generateMipmaps);
+    gfxSetImageName(&pTexture->image, pPath);
 
     stbi_image_free(pData);
 
@@ -4894,6 +5145,8 @@ static bool buildShaderObjects(GfxShader* pShader, bool fatal)
     if (ok) {
         for (uint32_t i = 0; i < pShader->stageCount; i++) {
             pShader->pStages[i].shader = pShaders[i];
+            const char* pName = pShader->pStages[i].pPath ? pShader->pStages[i].pPath : shaderName(pShader);
+            gfxSetDebugName(VK_OBJECT_TYPE_SHADER_EXT, (uint64_t)pShaders[i], pName);
         }
     } else {
         GFX_FAIL(fatal, "Failed to create shader objects for %s: %s", shaderName(pShader), gfxResultString(result));
@@ -6071,6 +6324,7 @@ static void createRayTracingPipeline(GfxRayTracingPipeline* pPipeline)
     };
     VK_CHECK(gfxDevice.fn.vkCreateRayTracingPipelinesKHR(gfxDevice.device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &ci, NULL,
                                                          &pPipeline->pipeline));
+    gfxSetDebugName(VK_OBJECT_TYPE_PIPELINE, (uint64_t)pPipeline->pipeline, shaderName(pShader));
 
     // Shader binding table. Every region starts at the base alignment, and
     // records within a region are a stride apart.
@@ -6251,6 +6505,113 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
 }
 
 
+// Debug names, labels and GPU timers //
+
+void gfxSetDebugName(VkObjectType type, uint64_t handle, const char* pName)
+{
+    if (!gfxDevice.fn.vkSetDebugUtilsObjectNameEXT || !handle) {
+        return;
+    }
+
+    VkDebugUtilsObjectNameInfoEXT info = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+        .objectType = type,
+        .objectHandle = handle,
+        .pObjectName = pName,
+    };
+
+    VK_CHECK(gfxDevice.fn.vkSetDebugUtilsObjectNameEXT(gfxDevice.device, &info));
+}
+
+void gfxSetBufferName(const GfxBuffer* pBuffer, const char* pName)
+{
+    gfxSetDebugName(VK_OBJECT_TYPE_BUFFER, (uint64_t)pBuffer->buffer, pName);
+    gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pBuffer->memory, pName);
+}
+
+void gfxSetImageName(const GfxImage* pImage, const char* pName)
+{
+    gfxSetDebugName(VK_OBJECT_TYPE_IMAGE, (uint64_t)pImage->image, pName);
+    gfxSetDebugName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)pImage->imageView, pName);
+    gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pImage->memory, pName);
+}
+
+void gfxCmdBeginLabel(VkCommandBuffer cmd, const char* pName)
+{
+    if (!gfxDevice.fn.vkCmdBeginDebugUtilsLabelEXT) {
+        return;
+    }
+
+    VkDebugUtilsLabelEXT label = {
+        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+        .pLabelName = pName,
+    };
+
+    gfxDevice.fn.vkCmdBeginDebugUtilsLabelEXT(cmd, &label);
+}
+
+void gfxCmdEndLabel(VkCommandBuffer cmd)
+{
+    if (gfxDevice.fn.vkCmdEndDebugUtilsLabelEXT) {
+        gfxDevice.fn.vkCmdEndDebugUtilsLabelEXT(cmd);
+    }
+}
+
+// Timestamps are written when all earlier commands have finished, so a timer
+// measures its commands from when the ones before them are done
+void gfxCmdBeginTimer(VkCommandBuffer cmd, const char* pName)
+{
+    if (!gfxTimers.pFrames) {
+        return;
+    }
+
+    if (gfxTimers.depth == GFX_MAX_TIMERS) {
+        GFX_ERROR("GPU timers are nested deeper than GFX_MAX_TIMERS");
+        return;
+    }
+
+    GfxTimerFrame* pFrame = &gfxTimers.pFrames[gfxSwapchain.inFlightIndex];
+
+    uint32_t index = UINT32_MAX;
+    if (pFrame->count < GFX_MAX_TIMERS) {
+        index = pFrame->count++;
+        GfxTimerResult* pTimer = &pFrame->timers[index];
+        snprintf(pTimer->name, sizeof pTimer->name, "%s", pName);
+        pTimer->depth = gfxTimers.depth;
+        pTimer->milliseconds = 0.0;
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pFrame->queryPool, 2 * index);
+    } else if (!gfxTimers.reported) {
+        GFX_WARNING("A frame has more than GFX_MAX_TIMERS GPU timers, the ones from %s on are not measured", pName);
+        gfxTimers.reported = true;
+    }
+
+    gfxTimers.stack[gfxTimers.depth++] = index;
+}
+
+void gfxCmdEndTimer(VkCommandBuffer cmd)
+{
+    if (!gfxTimers.pFrames) {
+        return;
+    }
+
+    if (!gfxTimers.depth) {
+        GFX_ERROR("gfxCmdEndTimer() called without a timer to end");
+        return;
+    }
+
+    uint32_t index = gfxTimers.stack[--gfxTimers.depth];
+    if (index != UINT32_MAX) {
+        GfxTimerFrame* pFrame = &gfxTimers.pFrames[gfxSwapchain.inFlightIndex];
+        vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, pFrame->queryPool, 2 * index + 1);
+    }
+}
+
+uint32_t gfxGetTimerResults(const GfxTimerResult** ppResults)
+{
+    *ppResults = gfxTimers.results;
+    return gfxTimers.resultCount;
+}
+
 // Render graph //
 
 void gfxCreateRenderGraph(GfxRenderGraph* pGraph)
@@ -6373,7 +6734,13 @@ static void createGraphImage(GfxGraphResource* pResource)
                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, VK_IMAGE_TYPE_2D, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                        &pResource->multisampled);
         gfxCreateImageView(&pResource->multisampled, aspect, VK_IMAGE_VIEW_TYPE_2D);
+
+        char name[256];
+        snprintf(name, sizeof name, "%s (multisampled)", pResource->pName);
+        gfxSetImageName(&pResource->multisampled, name);
     }
+
+    gfxSetImageName(&pResource->image, pResource->pName);
 
     pResource->layout = VK_IMAGE_LAYOUT_UNDEFINED;
     pResource->written = false;
@@ -6782,6 +7149,10 @@ void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph)
     for (uint32_t i = 0; i < pGraph->passCount; i++) {
         GfxGraphPass* pPass = &pGraph->pPasses[pGraph->pOrder[i]];
 
+        // A pass is labeled and timed with its barriers included
+        gfxCmdBeginLabel(cmd, pPass->pName);
+        gfxCmdBeginTimer(cmd, pPass->pName);
+
         for (uint32_t j = 0; j < pPass->inputCount; j++) {
             GfxGraphResource* pResource = pGraph->ppResources[pPass->inputs[j]];
             transitionGraphResource(cmd, pResource, graphReadLayout(pResource), false);
@@ -6822,6 +7193,9 @@ void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph)
         } else {
             pPass->function(cmd, NULL, pPass->pUserData);
         }
+
+        gfxCmdEndTimer(cmd);
+        gfxCmdEndLabel(cmd);
     }
 
     // Hand the output over ready to be presented

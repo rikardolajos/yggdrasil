@@ -203,6 +203,23 @@ static void scenePass(VkCommandBuffer cmd, const GfxAttachment* pAttachment, voi
     drawObjects(cmd, pScene, pScene->pSceneShader);
 }
 
+// Show the GPU time of the latest finished frame, and of each of its passes, in
+// the window title
+static void showTimers()
+{
+    const GfxTimerResult* pResults;
+    uint32_t count = gfxGetTimerResults(&pResults);
+
+    char title[256] = "GFX Shadow Mapping Example";
+    size_t length = strlen(title);
+    for (uint32_t i = 0; i < count && length < sizeof title; i++) {
+        length += (size_t)snprintf(title + length, sizeof title - length, " | %s %.3f ms", pResults[i].name,
+                                   pResults[i].milliseconds);
+    }
+
+    glfwSetWindowTitle(pWindow, title);
+}
+
 int main()
 {
     createWindow();
@@ -305,12 +322,20 @@ int main()
     bool reloadKeyDown = false;
     bool screenshotKeyDown = false;
     float angle = 0.0f;
+    float timerAge = 0.0f;
 
     // Seconds since last game loop
     float delta = 0.0f;
     while (!glfwWindowShouldClose(pWindow)) {
         delta = (float)glfwGetTime();
         glfwSetTime(0.0);
+
+        // Twice a second is often enough to read the numbers
+        timerAge += delta;
+        if (timerAge >= 0.5f) {
+            showTimers();
+            timerAge = 0.0f;
+        }
 
         // Reload shaders when F5 is pressed
         bool reloadKey = glfwGetKey(pWindow, GLFW_KEY_F5) == GLFW_PRESS;
