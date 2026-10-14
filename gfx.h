@@ -735,11 +735,19 @@ void gfxDestroyInstance();
 /// Create a new device. Handle is internally managed and accessible through
 /// gfxDevice. The available devices are listed with their indices when it is
 /// created.
+///
+/// The extensions and features that yggdrasil uses are always enabled, and
+/// ray tracing and anisotropic filtering are enabled when the device supports
+/// them. The extensions and features passed here are enabled in addition. The
+/// features yggdrasil needs are switched on in the passed structures when they
+/// are of the same type, so core features must be passed in
+/// VkPhysicalDeviceVulkan1xFeatures and not in the structures of the
+/// extensions that were promoted to core.
 /// </summary>
 /// <param name="physicalDeviceIndex">Index of the physical device to use, or GFX_DEFAULT_DEVICE</param>
-/// <param name="deviceExtensionCount">Number of device extensions</param>
-/// <param name="ppDeviceExtensions">List of device extensions to use</param>
-/// <param name="features">Pointer to features that will be put in pNext of VkDeviceCreateInfo, can be NULL</param>
+/// <param name="deviceExtensionCount">Number of extra device extensions</param>
+/// <param name="ppDeviceExtensions">List of extra device extensions, can be NULL</param>
+/// <param name="features">Extra features, can be NULL</param>
 /// <param name="surface">Surface to use</param>
 void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount, const char** ppDeviceExtensions,
                      VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface);
@@ -1898,6 +1906,64 @@ static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount, const cha
     return result;
 }
 
+static bool deviceExtensionAvailable(const char* pName)
+{
+    uint32_t n;
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(gfxDevice.physicalDevice, NULL, &n, NULL));
+    VkExtensionProperties* pAvailable = GFX_MALLOC(n * sizeof *pAvailable);
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(gfxDevice.physicalDevice, NULL, &n, pAvailable));
+
+    bool found = false;
+    for (uint32_t i = 0; i < n && !found; i++) {
+        found = !strcmp(pName, pAvailable[i].extensionName);
+    }
+
+    GFX_FREE(pAvailable);
+
+    return found;
+}
+
+static bool extensionInList(uint32_t extensionCount, const char** ppExtensions, const char* pName)
+{
+    for (uint32_t i = 0; i < extensionCount; i++) {
+        if (!strcmp(pName, ppExtensions[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static const void* findStructure(const void* pNext, VkStructureType sType)
+{
+    for (const VkBaseInStructure* p = pNext; p; p = p->pNext) {
+        if (p->sType == sType) {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+// A structure type may only appear once in a pNext chain, so features that
+// yggdrasil needs are switched on in the caller's structure when there is one,
+// and otherwise linked into the chain. Feature structures are a header followed
+// by VkBool32 members only, which lets them be merged without knowing the type.
+static void mergeFeatures(VkDeviceCreateInfo* pCreateInfo, void* pRequired, size_t size)
+{
+    VkBaseOutStructure* pHeader = pRequired;
+    VkBaseOutStructure* pExisting = (VkBaseOutStructure*)findStructure(pCreateInfo->pNext, pHeader->sType);
+
+    if (pExisting) {
+        VkBool32* pDst = (VkBool32*)(pExisting + 1);
+        const VkBool32* pSrc = (const VkBool32*)(pHeader + 1);
+        for (size_t i = 0; i < (size - sizeof *pHeader) / sizeof(VkBool32); i++) {
+            pDst[i] |= pSrc[i];
+        }
+    } else {
+        pHeader->pNext = (VkBaseOutStructure*)pCreateInfo->pNext;
+        pCreateInfo->pNext = pHeader;
+    }
+}
+
 static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamilyFlags)
 {
     uint32_t n;
@@ -2039,7 +2105,71 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     GFX_FREE(pPhysicalDevices);
 
-    checkDeviceExtensionSupport(deviceExtensionCount, ppDeviceExtensions);
+    uint32_t apiVersion = gfxDevice.properties.physicalDevice.apiVersion;
+    if (apiVersion < VK_API_VERSION_1_3) {
+        GFX_ERROR("The chosen device supports Vulkan %d.%d, but yggdrasil needs Vulkan 1.3",
+                  VK_API_VERSION_MAJOR(apiVersion), VK_API_VERSION_MINOR(apiVersion));
+        return;
+    }
+
+    // Ray tracing is enabled whenever the device supports it
+    bool rayTracingSupport = deviceExtensionAvailable(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+                             deviceExtensionAvailable(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
+                             deviceExtensionAvailable(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineSupport = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+    };
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureSupport = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        .pNext = &rayTracingPipelineSupport,
+    };
+
+    VkPhysicalDeviceFeatures2 support = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = rayTracingSupport ? &accelerationStructureSupport : NULL,
+    };
+
+    vkGetPhysicalDeviceFeatures2(gfxDevice.physicalDevice, &support);
+    rayTracingSupport = rayTracingSupport && accelerationStructureSupport.accelerationStructure &&
+                        rayTracingPipelineSupport.rayTracingPipeline;
+
+    // The extensions that yggdrasil uses, followed by the requested ones that
+    // are not already in the list
+    const char* ppRequiredExtensions[5];
+    uint32_t requiredExtensionCount = 0;
+    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_SHADER_OBJECT_EXTENSION_NAME;
+    if (surface) {
+        ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    }
+    if (rayTracingSupport) {
+        ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+        ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+        ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME;
+    }
+
+    uint32_t extensionCount = 0;
+    const char** ppExtensions = GFX_MALLOC((requiredExtensionCount + deviceExtensionCount) * sizeof *ppExtensions);
+    for (uint32_t i = 0; i < requiredExtensionCount + deviceExtensionCount; i++) {
+        const char* pName =
+            i < requiredExtensionCount ? ppRequiredExtensions[i] : ppDeviceExtensions[i - requiredExtensionCount];
+        if (!extensionInList(extensionCount, ppExtensions, pName)) {
+            ppExtensions[extensionCount++] = pName;
+        }
+    }
+
+    if (!checkDeviceExtensionSupport(extensionCount, ppExtensions)) {
+        GFX_FREE(ppExtensions);
+        return;
+    }
+
+    // Entry points of extensions that are not enabled are not reliably NULL,
+    // so what is enabled is taken from the extension list
+    gfxDevice.accelerationStructures =
+        extensionInList(extensionCount, ppExtensions, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+    gfxDevice.rayTracingPipelines =
+        extensionInList(extensionCount, ppExtensions, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
 
     uint32_t queueFamilyIndex =
         getQueueFamilyIndex(surface, VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT);
@@ -2057,38 +2187,86 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
         .pNext = features,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = &queueCreateInfo,
-        .enabledExtensionCount = deviceExtensionCount,
-        .ppEnabledExtensionNames = ppDeviceExtensions,
+        .enabledExtensionCount = extensionCount,
+        .ppEnabledExtensionNames = ppExtensions,
     };
+
+    // The features that yggdrasil uses, merged with the requested ones
+    VkPhysicalDeviceFeatures2 requiredFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .features =
+            {
+                .samplerAnisotropy = support.features.samplerAnisotropy,
+            },
+    };
+
+    VkPhysicalDeviceVulkan12Features requiredVk12Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .bufferDeviceAddress = VK_TRUE,
+    };
+
+    // Shaders are compiled to SPIR-V 1.6, where discard demotes the invocation
+    // to a helper invocation
+    VkPhysicalDeviceVulkan13Features requiredVk13Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .shaderDemoteToHelperInvocation = VK_TRUE,
+        .synchronization2 = VK_TRUE,
+        .dynamicRendering = VK_TRUE,
+    };
+
+    VkPhysicalDeviceShaderObjectFeaturesEXT requiredShaderObjectFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .shaderObject = VK_TRUE,
+    };
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR requiredAccelerationStructureFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        .accelerationStructure = VK_TRUE,
+    };
+
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR requiredRayTracingPipelineFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
+        .rayTracingPipeline = VK_TRUE,
+    };
+
+    mergeFeatures(&ci, &requiredFeatures, sizeof requiredFeatures);
+    mergeFeatures(&ci, &requiredVk12Features, sizeof requiredVk12Features);
+    mergeFeatures(&ci, &requiredVk13Features, sizeof requiredVk13Features);
+    mergeFeatures(&ci, &requiredShaderObjectFeatures, sizeof requiredShaderObjectFeatures);
+    if (gfxDevice.accelerationStructures) {
+        mergeFeatures(&ci, &requiredAccelerationStructureFeatures, sizeof requiredAccelerationStructureFeatures);
+    }
+    if (gfxDevice.rayTracingPipelines) {
+        mergeFeatures(&ci, &requiredRayTracingPipelineFeatures, sizeof requiredRayTracingPipelineFeatures);
+    }
 
     VK_CHECK(vkCreateDevice(gfxDevice.physicalDevice, &ci, NULL, &gfxDevice.device));
 
-    // Remember whether anisotropic filtering was requested, so that samplers
-    // are not created with a feature that the device was not created with
-    gfxDevice.samplerAnisotropy = features && features->features.samplerAnisotropy;
+    GFX_FREE(ppExtensions);
+
+    const VkPhysicalDeviceFeatures2* pFeatures = findStructure(ci.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
+    const VkPhysicalDeviceMeshShaderFeaturesEXT* pMeshFeatures =
+        findStructure(ci.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
+
+    // Remember whether anisotropic filtering is enabled, so that samplers are
+    // not created with a feature that the device was not created with
+    gfxDevice.samplerAnisotropy = pFeatures->features.samplerAnisotropy;
 
     // Remember which graphics stages exist on the device, so that shaders can
     // bind the ones they do not use to null
     gfxDevice.graphicsShaderStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    if (features) {
-        if (features->features.tessellationShader) {
-            gfxDevice.graphicsShaderStages |=
-                VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-        }
-        if (features->features.geometryShader) {
-            gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_GEOMETRY_BIT;
-        }
-        for (const VkBaseInStructure* p = features->pNext; p; p = p->pNext) {
-            if (p->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT) {
-                const VkPhysicalDeviceMeshShaderFeaturesEXT* pMesh = (const VkPhysicalDeviceMeshShaderFeaturesEXT*)p;
-                if (pMesh->taskShader) {
-                    gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_TASK_BIT_EXT;
-                }
-                if (pMesh->meshShader) {
-                    gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_MESH_BIT_EXT;
-                }
-            }
-        }
+    if (pFeatures->features.tessellationShader) {
+        gfxDevice.graphicsShaderStages |=
+            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    }
+    if (pFeatures->features.geometryShader) {
+        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_GEOMETRY_BIT;
+    }
+    if (pMeshFeatures && pMeshFeatures->taskShader) {
+        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_TASK_BIT_EXT;
+    }
+    if (pMeshFeatures && pMeshFeatures->meshShader) {
+        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_MESH_BIT_EXT;
     }
 
     // Resolve extension entry points once, rather than on every call
@@ -2114,16 +2292,6 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_LOAD_FN(vkGetRayTracingShaderGroupHandlesKHR);
     GFX_LOAD_FN(vkCmdTraceRaysKHR);
 #undef GFX_LOAD_FN
-
-    // Entry points of extensions that are not enabled are not reliably NULL,
-    // so what is enabled is taken from the extension list
-    for (uint32_t i = 0; i < deviceExtensionCount; i++) {
-        if (!strcmp(ppDeviceExtensions[i], VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)) {
-            gfxDevice.accelerationStructures = true;
-        } else if (!strcmp(ppDeviceExtensions[i], VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
-            gfxDevice.rayTracingPipelines = true;
-        }
-    }
 
     VkCommandPoolCreateInfo commandPoolCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,

@@ -67,47 +67,6 @@ static void createInstance()
     gfxCreateInstance(VK_API_VERSION_1_3, instanceExtensionCount, ppInstanceExtensions);
 }
 
-static void createDevice(VkSurfaceKHR surface)
-{
-    const char* deviceExtensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-    };
-
-    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
-        .rayTracingPipeline = VK_TRUE,
-    };
-
-    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelerationStructureFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-        .pNext = &rayTracingPipelineFeatures,
-        .accelerationStructure = VK_TRUE,
-    };
-
-    VkPhysicalDeviceVulkan13Features vk13Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &accelerationStructureFeatures,
-        .synchronization2 = VK_TRUE,
-    };
-
-    VkPhysicalDeviceVulkan12Features vk12Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .pNext = &vk13Features,
-        .bufferDeviceAddress = VK_TRUE,
-    };
-
-    VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-                                          .pNext = &vk12Features,
-                                          .features = {
-                                              .samplerAnisotropy = VK_TRUE,
-                                          }};
-
-    gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
-}
-
 static void updateCamera(const GfxBuffer* pCameraBuffer)
 {
     vec3 position = {0.0f, 0.8f, 5.0f};
@@ -206,7 +165,7 @@ int main()
     VkSurfaceKHR surface;
     VK_CHECK(glfwCreateWindowSurface(gfxDevice.instance, pWindow, NULL, &surface));
 
-    createDevice(surface);
+    gfxCreateDevice(GFX_DEFAULT_DEVICE, 0, NULL, NULL, surface);
 
     gfxCreateSwapchain(2, framebufferSizeCallback);
 

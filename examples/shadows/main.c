@@ -79,34 +79,6 @@ static void createInstance()
     gfxCreateInstance(VK_API_VERSION_1_3, instanceExtensionCount, ppInstanceExtensions);
 }
 
-static void createDevice(VkSurfaceKHR surface)
-{
-    const char* deviceExtensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
-    };
-
-    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        .shaderObject = VK_TRUE,
-    };
-
-    VkPhysicalDeviceVulkan13Features vk13Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &shaderObjectFeatures,
-        .synchronization2 = VK_TRUE,
-        .dynamicRendering = VK_TRUE,
-    };
-
-    VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-                                          .pNext = &vk13Features,
-                                          .features = {
-                                              .samplerAnisotropy = VK_TRUE,
-                                          }};
-
-    gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
-}
-
 static void createGeometry(GfxBuffer* pVertexBuffer, GfxBuffer* pIndexBuffer)
 {
     Vertex vertices[] = {
@@ -240,7 +212,7 @@ int main()
     VkSurfaceKHR surface;
     VK_CHECK(glfwCreateWindowSurface(gfxDevice.instance, pWindow, NULL, &surface));
 
-    createDevice(surface);
+    gfxCreateDevice(GFX_DEFAULT_DEVICE, 0, NULL, NULL, surface);
 
     gfxCreateSwapchain(2, framebufferSizeCallback);
 

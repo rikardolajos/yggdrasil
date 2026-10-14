@@ -81,33 +81,17 @@ static void createInstance()
 
 static void createDevice(VkSurfaceKHR surface)
 {
-    const char* deviceExtensions[] = {
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-        VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+    // Points larger than one pixel need largePoints, on top of what yggdrasil
+    // enables itself
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .features =
+            {
+                .largePoints = VK_TRUE,
+            },
     };
 
-    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        .shaderObject = VK_TRUE,
-    };
-
-    // discard in SPIR-V 1.6 demotes the invocation to a helper invocation
-    VkPhysicalDeviceVulkan13Features vk13Features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-        .pNext = &shaderObjectFeatures,
-        .synchronization2 = VK_TRUE,
-        .dynamicRendering = VK_TRUE,
-        .shaderDemoteToHelperInvocation = VK_TRUE,
-    };
-
-    // Points larger than one pixel need largePoints
-    VkPhysicalDeviceFeatures2 features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-                                          .pNext = &vk13Features,
-                                          .features = {
-                                              .largePoints = VK_TRUE,
-                                          }};
-
-    gfxCreateDevice(GFX_DEFAULT_DEVICE, GFX_ARRAY_LEN(deviceExtensions), deviceExtensions, &features, surface);
+    gfxCreateDevice(GFX_DEFAULT_DEVICE, 0, NULL, &features, surface);
 }
 
 static float randomFloat()
