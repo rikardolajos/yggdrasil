@@ -72,12 +72,13 @@ implementation must be compiled as C.
 
 ## Getting started
 
-GFX keeps a single device and swapchain in the globals `gfxDevice` and `gfxSwapchain`.
+GFX keeps a single instance, device and swapchain in the globals `gfxInstance`, `gfxDevice`
+and `gfxSwapchain`.
 Initialization follows a fixed order:
 
 1. Create a window without a client API.
 2. Create the instance with the extensions required by the windowing library.
-3. Create a surface from `gfxDevice.instance`.
+3. Create a surface from `gfxInstance.instance`.
 4. Create the device with the surface. GFX takes ownership of the surface and destroys it
    in `gfxDestroyDevice()`.
 5. Create the swapchain with a callback that reports the framebuffer size.
@@ -125,7 +126,7 @@ int main()
     gfxCreateInstance(VK_API_VERSION_1_3, extensionCount, ppExtensions);
 
     VkSurfaceKHR surface;
-    VK_CHECK(glfwCreateWindowSurface(gfxDevice.instance, pWindow, NULL, &surface));
+    VK_CHECK(glfwCreateWindowSurface(gfxInstance.instance, pWindow, NULL, &surface));
     gfxCreateDevice(GFX_DEFAULT_DEVICE, 0, NULL, NULL, surface);
     gfxCreateSwapchain(2, framebufferSizeCallback);
 
@@ -191,7 +192,8 @@ libraries:
 
 | Object | Location |
 | --- | --- |
-| Instance, physical device, device | `gfxDevice.instance`, `gfxDevice.physicalDevice`, `gfxDevice.device` |
+| Instance | `gfxInstance.instance` |
+| Physical device, device | `gfxDevice.physicalDevice`, `gfxDevice.device` |
 | Queue and queue family | `gfxDevice.queue`, `gfxDevice.queueFamilyIndex` |
 | Swapchain format, extent, image count | `gfxSwapchain.format`, `gfxSwapchain.extent`, `gfxSwapchain.imageCount` |
 | Buffers and images | `GfxBuffer::buffer`, `GfxImage::image`, `GfxImage::imageView` |

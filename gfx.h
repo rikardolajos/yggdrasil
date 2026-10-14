@@ -254,11 +254,23 @@ typedef struct GfxDeviceFunctions {
     PFN_vkCmdEndDebugUtilsLabelEXT vkCmdEndDebugUtilsLabelEXT;
 } GfxDeviceFunctions;
 
-// Device contains a Vulkan context for rendering. The GFX device is
-// monolithic and is setup through gfxCreateInstance() and gfxCreateDevice().
-// Release resources with gfxDestroyDevice() and gfxDestroyInstance().
-typedef struct GfxDevice {
+// Instance holds the Vulkan instance that the device and surface are created
+// from. The GFX instance is monolithic and is setup through
+// gfxCreateInstance(). Create the window surface from gfxInstance.instance
+// before creating the device. Release resources with gfxDestroyInstance().
+typedef struct GfxInstance {
     VkInstance instance;
+#ifndef NDEBUG
+    VkDebugUtilsMessengerEXT debugMessenger;
+#endif
+    uint32_t apiVersion;
+    bool debugUtils; // VK_EXT_debug_utils is enabled
+} GfxInstance;
+
+// Device contains a Vulkan context for rendering. The GFX device is
+// monolithic and is setup through gfxCreateDevice(), after the instance has
+// been created. Release resources with gfxDestroyDevice().
+typedef struct GfxDevice {
     VkPhysicalDevice physicalDevice;
     VkDevice device;
     VkSurfaceKHR surface;
@@ -266,15 +278,10 @@ typedef struct GfxDevice {
     GfxDeviceFunctions fn;
     VkCommandPool commandPool;
     VkQueue queue;
-#ifndef NDEBUG
-    VkDebugUtilsMessengerEXT debugMessenger;
-#endif
     uint32_t queueFamilyIndex;
-    uint32_t apiVersion;
     VkShaderStageFlags graphicsShaderStages;
     bool accelerationStructures; // VK_KHR_acceleration_structure is enabled
     bool rayTracingPipelines;    // VK_KHR_ray_tracing_pipeline is enabled
-    bool debugUtils;             // VK_EXT_debug_utils is enabled
     uint64_t timestampMask;      // Valid bits of a timestamp, 0 if the queue has no timestamps
     uint64_t frame;
     uint64_t completedFrames;
@@ -735,6 +742,7 @@ typedef struct GfxTimerResult {
 
 // Monolithic global variables //
 
+extern GfxInstance gfxInstance;
 extern GfxDevice gfxDevice;
 extern GfxSwapchain gfxSwapchain;
 
@@ -752,7 +760,7 @@ extern GfxSwapchain gfxSwapchain;
 
 /// <summary>
 /// Create a new instance. Handle is internally managed and accessible through
-/// gfxDevice.
+/// gfxInstance.
 /// </summary>
 /// <param name="apiVersion">A Vulkan API version, VK_API_VERSION_* or VK_MAKE_API_VERSION()</param>
 /// <param name="instanceExtensionCount">Number of instance extensions</param>
@@ -999,8 +1007,8 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 /// smoothed shadow edges</param>
 /// <param name="addressMode">Address mode in all directions</param>
 /// <param name="compare">Whether the sampler compares against a reference depth</param>
-/// <returns>The sampler</returns>
-VkSampler gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare);
+/// <param name="pSampler">Where the created sampler will be stored</param>
+void gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare, VkSampler* pSampler);
 
 /// <summary>
 /// Release a sampler created with gfxCreateSampler().
@@ -1872,6 +1880,7 @@ gfxAccelerationStructureInstance(const GfxAccelerationStructure* pBLAS, const fl
 
 // Definitions for the extern declarations above. These must not be static, so
 // that every translation unit including this header shares the same objects.
+GfxInstance gfxInstance;
 GfxDevice gfxDevice;
 GfxSwapchain gfxSwapchain;
 
@@ -2026,7 +2035,7 @@ static void createDebugMessenger()
     VkDebugUtilsMessengerCreateInfoEXT ci;
     populateDebugMessengerCreateInfo(&ci);
 
-    VK_CHECK(createDebugUtilsMessengerEXT(gfxDevice.instance, &ci, NULL, &gfxDevice.debugMessenger));
+    VK_CHECK(createDebugUtilsMessengerEXT(gfxInstance.instance, &ci, NULL, &gfxInstance.debugMessenger));
 }
 #endif
 
@@ -2059,7 +2068,7 @@ static bool instanceExtensionAvailable(const char* pName)
 
 void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, const char** ppInstanceExtensions)
 {
-    gfxDevice.apiVersion = apiVersion;
+    gfxInstance.apiVersion = apiVersion;
 
     // VK_EXT_debug_utils names objects and regions of command buffers for
     // debuggers and profilers, so it is enabled whenever it is available
@@ -2072,7 +2081,7 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
         instanceExtensionAvailable(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)) {
         ppExtensions[extensionCount++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     }
-    gfxDevice.debugUtils = extensionInList(extensionCount, ppExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    gfxInstance.debugUtils = extensionInList(extensionCount, ppExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -2094,7 +2103,7 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
     ci.ppEnabledLayerNames = layers;
 #endif
 
-    VK_CHECK(vkCreateInstance(&ci, NULL, &gfxDevice.instance));
+    VK_CHECK(vkCreateInstance(&ci, NULL, &gfxInstance.instance));
 
     GFX_FREE(ppExtensions);
 
@@ -2105,7 +2114,7 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 
 #ifndef NDEBUG
     // Validation messages are reported through the debug utils messenger
-    if (gfxDevice.debugUtils) {
+    if (gfxInstance.debugUtils) {
         createDebugMessenger();
     }
 #endif
@@ -2116,18 +2125,18 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 
 void gfxDestroyInstance()
 {
-    if (gfxDevice.instance) {
+    if (gfxInstance.instance) {
 #ifndef NDEBUG
-        if (gfxDevice.debugMessenger) {
-            destroyDebugUtilsMessengerEXT(gfxDevice.instance, gfxDevice.debugMessenger, NULL);
+        if (gfxInstance.debugMessenger) {
+            destroyDebugUtilsMessengerEXT(gfxInstance.instance, gfxInstance.debugMessenger, NULL);
         }
 #endif
-        vkDestroyInstance(gfxDevice.instance, NULL);
+        vkDestroyInstance(gfxInstance.instance, NULL);
     }
 
     glslang_finalize_process();
 
-    GFX_RESET(&gfxDevice);
+    GFX_RESET(&gfxInstance);
 }
 
 static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount, const char** ppDeviceExtensions)
@@ -2278,7 +2287,7 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamil
 void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount, const char** ppDeviceExtensions,
                      VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface)
 {
-    if (!gfxDevice.instance) {
+    if (!gfxInstance.instance) {
         GFX_ERROR("Instance not initialized");
     }
 
@@ -2290,14 +2299,14 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     // Iterate all physical devices
     uint32_t n;
-    VK_CHECK(vkEnumeratePhysicalDevices(gfxDevice.instance, &n, NULL));
+    VK_CHECK(vkEnumeratePhysicalDevices(gfxInstance.instance, &n, NULL));
     if (!n) {
         GFX_ERROR("No Vulkan devices available");
         return;
     }
 
     VkPhysicalDevice* pPhysicalDevices = GFX_MALLOC(n * sizeof *pPhysicalDevices);
-    VK_CHECK(vkEnumeratePhysicalDevices(gfxDevice.instance, &n, pPhysicalDevices));
+    VK_CHECK(vkEnumeratePhysicalDevices(gfxInstance.instance, &n, pPhysicalDevices));
 
     if (physicalDeviceIndex == GFX_DEFAULT_DEVICE) {
         // Prefer the first discrete GPU, and settle for the first device
@@ -2547,8 +2556,8 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     // Debug utils is an instance extension, so its entry points come from the
     // instance
-    if (gfxDevice.debugUtils) {
-#define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetInstanceProcAddr(gfxDevice.instance, #name)
+    if (gfxInstance.debugUtils) {
+#define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetInstanceProcAddr(gfxInstance.instance, #name)
         GFX_LOAD_FN(vkSetDebugUtilsObjectNameEXT);
         GFX_LOAD_FN(vkCmdBeginDebugUtilsLabelEXT);
         GFX_LOAD_FN(vkCmdEndDebugUtilsLabelEXT);
@@ -2593,26 +2602,10 @@ void gfxDestroyDevice()
         vkDestroyDevice(gfxDevice.device, NULL);
     }
     if (gfxDevice.surface) {
-        vkDestroySurfaceKHR(gfxDevice.instance, gfxDevice.surface, NULL);
+        vkDestroySurfaceKHR(gfxInstance.instance, gfxDevice.surface, NULL);
     }
 
-    // Only reset the device owned state. The instance is still alive and is
-    // released by gfxDestroyInstance().
-    VkInstance instance = gfxDevice.instance;
-    uint32_t apiVersion = gfxDevice.apiVersion;
-    bool debugUtils = gfxDevice.debugUtils;
-#ifndef NDEBUG
-    VkDebugUtilsMessengerEXT debugMessenger = gfxDevice.debugMessenger;
-#endif
-
     GFX_RESET(&gfxDevice);
-
-    gfxDevice.instance = instance;
-    gfxDevice.apiVersion = apiVersion;
-    gfxDevice.debugUtils = debugUtils;
-#ifndef NDEBUG
-    gfxDevice.debugMessenger = debugMessenger;
-#endif
 }
 
 VkSampleCountFlagBits gfxGetDeviceSampleCount()
@@ -4311,7 +4304,7 @@ void gfxCreateTextureFromFile(enum GfxTextureType type, VkFormat format, const c
 }
 #endif
 
-VkSampler gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare)
+void gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bool compare, VkSampler* pSampler)
 {
     VkSamplerCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -4340,9 +4333,7 @@ VkSampler gfxCreateSampler(VkFilter filter, VkSamplerAddressMode addressMode, bo
 #endif
     }
 
-    VkSampler sampler;
-    VK_CHECK(vkCreateSampler(gfxDevice.device, &ci, NULL, &sampler));
-    return sampler;
+    VK_CHECK(vkCreateSampler(gfxDevice.device, &ci, NULL, pSampler));
 }
 
 void gfxDestroySampler(VkSampler sampler)
@@ -5235,8 +5226,8 @@ static uint32_t* compileGLSL(const char* pPath, VkShaderStageFlagBits stage, siz
     // Target the SPIR-V version that the Vulkan version guarantees
     glslang_target_client_version_t clientVersion = GLSLANG_TARGET_VULKAN_1_0;
     glslang_target_language_version_t spirvVersion = GLSLANG_TARGET_SPV_1_0;
-    if (VK_API_VERSION_MAJOR(gfxDevice.apiVersion) == 1) {
-        switch (VK_API_VERSION_MINOR(gfxDevice.apiVersion)) {
+    if (VK_API_VERSION_MAJOR(gfxInstance.apiVersion) == 1) {
+        switch (VK_API_VERSION_MINOR(gfxInstance.apiVersion)) {
         case 0:
             break;
         case 1:

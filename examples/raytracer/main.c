@@ -163,7 +163,7 @@ int main()
     createInstance();
 
     VkSurfaceKHR surface;
-    VK_CHECK(glfwCreateWindowSurface(gfxDevice.instance, pWindow, NULL, &surface));
+    VK_CHECK(glfwCreateWindowSurface(gfxInstance.instance, pWindow, NULL, &surface));
 
     gfxCreateDevice(GFX_DEFAULT_DEVICE, 0, NULL, NULL, surface);
 
