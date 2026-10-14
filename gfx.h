@@ -322,19 +322,31 @@ typedef struct GfxSwapchain {
     uint32_t inFlightIndex;
 } GfxSwapchain;
 
-// Buffer abstracts a Vulkan buffer and memory allocation. Prefer to use large
-// buffers and offsets than many small buffers, that would cause many small
-// allocations. Buffers are created with gfxCreateBuffer(). Copy data from host
-// to the device allocated buffer with gfxCopyBufferFromHost(). A buffer with
-// host coherent memory will always be mapped on pHostMap. Copies to buffers
-// with memory that is not host coherent go through staging memory and are
-// batched with other uploads, see gfxFlushUploads(). Data that changes every frame belongs in a per-frame buffer,
-// created with gfxCreatePerFrameBuffer(), which holds one copy per frame in flight. Write this frame's copy through
-// gfxGetPerFrameData(); shaders the buffer is attached to read the copy of the frame they are recorded in. Release
+// Size of the blocks of device memory that buffers and images are placed in.
+// Heaps smaller than eight blocks get blocks of an eighth of the heap, and
+// resources larger than half a block, or that the driver wants alone, get
+// memory of their own.
+#ifndef GFX_MEMORY_BLOCK_SIZE
+#define GFX_MEMORY_BLOCK_SIZE (64ull * 1024 * 1024)
+#endif
+
+// Buffer abstracts a Vulkan buffer and its memory. Buffers are created with
+// gfxCreateBuffer(), and placed in blocks of device memory shared with other
+// resources, see GFX_MEMORY_BLOCK_SIZE, from memoryOffset on. Copy data from
+// host to the device allocated buffer with gfxCopyBufferFromHost(). A buffer
+// with host coherent memory will always be mapped on pHostMap. Copies to
+// buffers with memory that is not host coherent go through staging memory and
+// are batched with other uploads, see gfxFlushUploads(). Data that changes
+// every frame belongs in a per-frame buffer, created with
+// gfxCreatePerFrameBuffer(), which holds one copy per frame in flight. Write
+// this frame's copy through gfxGetPerFrameData(); shaders the buffer is
+// attached to read the copy of the frame they are recorded in. Release
 // resources with gfxDestroyBuffer().
 typedef struct GfxBuffer {
     VkBuffer buffer;
     VkDeviceMemory memory;
+    VkDeviceSize memoryOffset; // Where the buffer starts in memory
+    VkDeviceSize memorySize;   // Bytes of memory taken by the buffer
     VkBufferUsageFlags usage;
     VkMemoryPropertyFlags properties;
     VkDeviceSize size;
@@ -344,13 +356,17 @@ typedef struct GfxBuffer {
     VkDeviceSize frameStride; // Distance between per-frame copies
 } GfxBuffer;
 
-// Image abstracts a Vulkan image, image view and memory allocation. Use
+// Image abstracts a Vulkan image, image view and its memory. Use
 // gfxCreateImage() to create a new image and gfxCreateImageView() to create an
-// image view for a created image. Release resources with gfxDestroyImage().
+// image view for a created image. Like buffers, images are placed in blocks of
+// device memory shared with other resources. Release resources with
+// gfxDestroyImage().
 typedef struct GfxImage {
     VkImage image;
     VkImageView imageView;
     VkDeviceMemory memory;
+    VkDeviceSize memoryOffset; // Where the image starts in memory
+    VkDeviceSize memorySize;   // Bytes of memory taken by the image
     uint32_t width;
     uint32_t height;
     uint32_t depth;
@@ -1416,14 +1432,16 @@ void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph);
 void gfxSetDebugName(VkObjectType type, uint64_t handle, const char* pName);
 
 /// <summary>
-/// Name a buffer and its memory, see gfxSetDebugName().
+/// Name a buffer, and its memory if it has memory of its own, see
+/// gfxSetDebugName().
 /// </summary>
 /// <param name="pBuffer">Buffer to name</param>
 /// <param name="pName">Name to give it</param>
 void gfxSetBufferName(const GfxBuffer* pBuffer, const char* pName);
 
 /// <summary>
-/// Name an image, its image view and its memory, see gfxSetDebugName().
+/// Name an image, its image view, and its memory if it has memory of its own,
+/// see gfxSetDebugName().
 /// </summary>
 /// <param name="pImage">Image to name</param>
 /// <param name="pName">Name to give it</param>
@@ -1898,7 +1916,41 @@ static struct GfxUploads {
     bool recording;
 } gfxUploads;
 
+typedef struct GfxMemoryRange {
+    VkDeviceSize offset;
+    VkDeviceSize size;
+} GfxMemoryRange;
+
+// Device memory that buffers and images are placed in, with the ranges of it
+// that are free
+typedef struct GfxMemoryBlock {
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+    uint32_t memoryTypeIndex;
+    bool optimal;  // Holds images with optimal tiling, and nothing else
+    void* pMapped; // The whole block, if the memory is host visible
+    uint32_t allocationCount;
+    uint32_t freeCount;
+    uint32_t freeCapacity;
+    GfxMemoryRange* pFree; // Sorted by offset, never adjacent
+} GfxMemoryBlock;
+
+static struct GfxMemory {
+    uint32_t blockCount;
+    uint32_t blockCapacity;
+    GfxMemoryBlock* pBlocks;
+    uint32_t dedicatedCount; // Allocations with memory of their own
+} gfxMemory;
+
+typedef struct GfxMemoryAllocation {
+    VkDeviceMemory memory;
+    VkDeviceSize offset;
+    VkDeviceSize size;
+    void* pMapped; // At the offset, if the memory is host visible
+} GfxMemoryAllocation;
+
 static void destroyUploadBatches();
+static void destroyMemoryBlocks();
 
 
 // Helper macros //
@@ -2532,6 +2584,7 @@ void gfxDestroyDevice()
 
     destroyUploadBatches();
     vkDeviceWaitIdle(gfxDevice.device);
+    destroyMemoryBlocks();
 
     if (gfxDevice.commandPool) {
         vkDestroyCommandPool(gfxDevice.device, gfxDevice.commandPool, NULL);
@@ -3131,6 +3184,227 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
     gfxDevice.frame++;
 }
 
+// Memory blocks //
+
+// Allocate device memory, mapped if it is host visible. Memory for buffers can
+// hold buffers with device addresses, which every block allows since any
+// buffer may end up in it.
+static VkDeviceMemory allocateDeviceMemory(VkDeviceSize size, uint32_t memoryTypeIndex, bool deviceAddress,
+                                           const void* pNext, void** ppMapped)
+{
+    VkMemoryAllocateFlagsInfo flagsInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+        .pNext = pNext,
+        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+    };
+
+    VkMemoryAllocateInfo ai = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .pNext = deviceAddress ? &flagsInfo : pNext,
+        .allocationSize = size,
+        .memoryTypeIndex = memoryTypeIndex,
+    };
+
+    VkDeviceMemory memory;
+    VK_CHECK(vkAllocateMemory(gfxDevice.device, &ai, NULL, &memory));
+
+    *ppMapped = NULL;
+    if (gfxDevice.properties.memory.memoryTypes[memoryTypeIndex].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        VK_CHECK(vkMapMemory(gfxDevice.device, memory, 0, VK_WHOLE_SIZE, 0, ppMapped));
+    }
+
+    return memory;
+}
+
+static GfxMemoryBlock* findMemoryBlock(VkDeviceMemory memory)
+{
+    for (uint32_t i = 0; i < gfxMemory.blockCount; i++) {
+        if (gfxMemory.pBlocks[i].memory == memory) {
+            return &gfxMemory.pBlocks[i];
+        }
+    }
+    return NULL;
+}
+
+// Replace removeCount free ranges of a block, from index on, with insertCount
+// others
+static void spliceFreeRanges(GfxMemoryBlock* pBlock, uint32_t index, uint32_t removeCount,
+                             const GfxMemoryRange* pInsert, uint32_t insertCount)
+{
+    uint32_t count = pBlock->freeCount - removeCount + insertCount;
+    if (count > pBlock->freeCapacity) {
+        pBlock->freeCapacity = GFX_MAX(count, pBlock->freeCapacity * 2);
+        pBlock->pFree = GFX_REALLOC(pBlock->pFree, pBlock->freeCapacity * sizeof *pBlock->pFree);
+    }
+
+    memmove(&pBlock->pFree[index + insertCount], &pBlock->pFree[index + removeCount],
+            (pBlock->freeCount - index - removeCount) * sizeof *pBlock->pFree);
+    memcpy(&pBlock->pFree[index], pInsert, insertCount * sizeof *pInsert);
+    pBlock->freeCount = count;
+}
+
+// Take the first free range that fits, leaving what is before and after it
+// free
+static bool allocateFromBlock(GfxMemoryBlock* pBlock, VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize* pOffset)
+{
+    for (uint32_t i = 0; i < pBlock->freeCount; i++) {
+        GfxMemoryRange range = pBlock->pFree[i];
+        VkDeviceSize start = gfxAlignTo(range.offset, alignment);
+        if (start + size > range.offset + range.size) {
+            continue;
+        }
+
+        GfxMemoryRange remaining[2];
+        uint32_t remainingCount = 0;
+        if (start > range.offset) {
+            remaining[remainingCount++] = (GfxMemoryRange){range.offset, start - range.offset};
+        }
+        if (start + size < range.offset + range.size) {
+            remaining[remainingCount++] = (GfxMemoryRange){start + size, range.offset + range.size - start - size};
+        }
+        spliceFreeRanges(pBlock, i, 1, remaining, remainingCount);
+
+        pBlock->allocationCount++;
+        *pOffset = start;
+        return true;
+    }
+    return false;
+}
+
+static void destroyMemoryBlock(uint32_t index)
+{
+    GfxMemoryBlock* pBlock = &gfxMemory.pBlocks[index];
+    vkFreeMemory(gfxDevice.device, pBlock->memory, NULL);
+    GFX_FREE(pBlock->pFree);
+
+    gfxMemory.pBlocks[index] = gfxMemory.pBlocks[--gfxMemory.blockCount];
+}
+
+// Find memory for a resource, in a block of the right memory type that holds
+// the same kind of resources, in a new block, or in memory of its own. Buffers
+// and images with optimal tiling never share a block, so that
+// bufferImageGranularity does not have to be followed.
+static GfxMemoryAllocation allocateMemory(const VkMemoryRequirements* pRequirements, VkMemoryPropertyFlags properties,
+                                          bool optimal, bool dedicated, const void* pDedicatedInfo)
+{
+    uint32_t memoryTypeIndex = gfxFindMemoryType(pRequirements->memoryTypeBits, properties);
+    uint32_t heapIndex = gfxDevice.properties.memory.memoryTypes[memoryTypeIndex].heapIndex;
+    VkDeviceSize blockSize =
+        GFX_MIN((VkDeviceSize)GFX_MEMORY_BLOCK_SIZE, gfxDevice.properties.memory.memoryHeaps[heapIndex].size / 8);
+
+    GfxMemoryAllocation allocation = {.size = pRequirements->size};
+
+    if (dedicated || pRequirements->size > blockSize / 2) {
+        allocation.memory =
+            allocateDeviceMemory(pRequirements->size, memoryTypeIndex, !optimal, pDedicatedInfo, &allocation.pMapped);
+        gfxMemory.dedicatedCount++;
+        return allocation;
+    }
+
+    for (uint32_t i = 0; i < gfxMemory.blockCount; i++) {
+        GfxMemoryBlock* pBlock = &gfxMemory.pBlocks[i];
+        if (pBlock->memoryTypeIndex == memoryTypeIndex && pBlock->optimal == optimal &&
+            allocateFromBlock(pBlock, pRequirements->size, pRequirements->alignment, &allocation.offset)) {
+            allocation.memory = pBlock->memory;
+            allocation.pMapped = pBlock->pMapped ? (char*)pBlock->pMapped + allocation.offset : NULL;
+            return allocation;
+        }
+    }
+
+    if (gfxMemory.blockCount == gfxMemory.blockCapacity) {
+        gfxMemory.blockCapacity = gfxMemory.blockCapacity ? gfxMemory.blockCapacity * 2 : 8;
+        gfxMemory.pBlocks = GFX_REALLOC(gfxMemory.pBlocks, gfxMemory.blockCapacity * sizeof *gfxMemory.pBlocks);
+    }
+
+    GfxMemoryBlock* pBlock = &gfxMemory.pBlocks[gfxMemory.blockCount++];
+    *pBlock = (GfxMemoryBlock){
+        .size = blockSize,
+        .memoryTypeIndex = memoryTypeIndex,
+        .optimal = optimal,
+    };
+    pBlock->memory = allocateDeviceMemory(blockSize, memoryTypeIndex, !optimal, NULL, &pBlock->pMapped);
+    spliceFreeRanges(pBlock, 0, 0, &(GfxMemoryRange){0, blockSize}, 1);
+
+    char name[64];
+    snprintf(name, sizeof name, "Memory block, type %" PRIu32 "%s", memoryTypeIndex, optimal ? ", images" : "");
+    gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pBlock->memory, name);
+    GFX_DEBUG("Allocated a %" PRIu64 " MB memory block of type %" PRIu32 "%s", (uint64_t)(blockSize >> 20),
+              memoryTypeIndex, optimal ? " for images" : "");
+
+    allocateFromBlock(pBlock, pRequirements->size, pRequirements->alignment, &allocation.offset);
+    allocation.memory = pBlock->memory;
+    allocation.pMapped = pBlock->pMapped ? (char*)pBlock->pMapped + allocation.offset : NULL;
+    return allocation;
+}
+
+// Give memory back to its block, merging it with the free ranges around it.
+// Of the blocks that end up empty, one of each kind is kept for later use.
+static void freeMemory(VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size)
+{
+    if (!memory) {
+        return;
+    }
+
+    GfxMemoryBlock* pBlock = findMemoryBlock(memory);
+    if (!pBlock) {
+        vkFreeMemory(gfxDevice.device, memory, NULL);
+        gfxMemory.dedicatedCount--;
+        return;
+    }
+
+    uint32_t next = 0;
+    while (next < pBlock->freeCount && pBlock->pFree[next].offset < offset) {
+        next++;
+    }
+
+    GfxMemoryRange merged = {offset, size};
+    uint32_t index = next;
+    uint32_t removeCount = 0;
+    if (next > 0 && pBlock->pFree[next - 1].offset + pBlock->pFree[next - 1].size == offset) {
+        index = next - 1;
+        merged.offset = pBlock->pFree[index].offset;
+        merged.size += pBlock->pFree[index].size;
+        removeCount++;
+    }
+    if (next < pBlock->freeCount && offset + size == pBlock->pFree[next].offset) {
+        merged.size += pBlock->pFree[next].size;
+        removeCount++;
+    }
+    spliceFreeRanges(pBlock, index, removeCount, &merged, 1);
+    pBlock->allocationCount--;
+
+    if (pBlock->allocationCount) {
+        return;
+    }
+
+    for (uint32_t i = 0; i < gfxMemory.blockCount; i++) {
+        GfxMemoryBlock* pOther = &gfxMemory.pBlocks[i];
+        if (pOther != pBlock && !pOther->allocationCount && pOther->memoryTypeIndex == pBlock->memoryTypeIndex &&
+            pOther->optimal == pBlock->optimal) {
+            destroyMemoryBlock((uint32_t)(pBlock - gfxMemory.pBlocks));
+            return;
+        }
+    }
+}
+
+static void destroyMemoryBlocks()
+{
+    uint32_t leaked = gfxMemory.dedicatedCount;
+    for (uint32_t i = 0; i < gfxMemory.blockCount; i++) {
+        leaked += gfxMemory.pBlocks[i].allocationCount;
+    }
+    if (leaked) {
+        GFX_WARNING("%" PRIu32 " buffers and images were not destroyed before the device", leaked);
+    }
+
+    while (gfxMemory.blockCount) {
+        destroyMemoryBlock(gfxMemory.blockCount - 1);
+    }
+
+    GFX_FREE(gfxMemory.pBlocks);
+    GFX_RESET(&gfxMemory);
+}
+
 void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, GfxBuffer* pBuffer)
 {
     if (!gfxDevice.device) {
@@ -3152,45 +3426,46 @@ void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryProper
 
     VK_CHECK(vkCreateBuffer(gfxDevice.device, &ci, NULL, &pBuffer->buffer));
 
-    VkMemoryRequirements memReqs;
-    vkGetBufferMemoryRequirements(gfxDevice.device, pBuffer->buffer, &memReqs);
-
-    pBuffer->size = memReqs.size;
-
-    VkMemoryAllocateFlagsInfo allocFlagInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
-        .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT,
+    VkMemoryDedicatedRequirements dedicatedRequirements = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
     };
-
-    VkMemoryAllocateInfo allocInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memReqs.size,
-        .memoryTypeIndex = gfxFindMemoryType(memReqs.memoryTypeBits, properties),
+    VkMemoryRequirements2 requirements = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+        .pNext = &dedicatedRequirements,
     };
+    VkBufferMemoryRequirementsInfo2 requirementsInfo = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+        .buffer = pBuffer->buffer,
+    };
+    vkGetBufferMemoryRequirements2(gfxDevice.device, &requirementsInfo, &requirements);
 
-    if (pBuffer->usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) {
-        allocInfo.pNext = &allocFlagInfo;
-    }
+    VkMemoryDedicatedAllocateInfo dedicatedInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .buffer = pBuffer->buffer,
+    };
+    GfxMemoryAllocation allocation = allocateMemory(&requirements.memoryRequirements, properties, false,
+                                                    dedicatedRequirements.prefersDedicatedAllocation ||
+                                                        dedicatedRequirements.requiresDedicatedAllocation,
+                                                    &dedicatedInfo);
 
-    VK_CHECK(vkAllocateMemory(gfxDevice.device, &allocInfo, NULL, &pBuffer->memory));
+    pBuffer->size = requirements.memoryRequirements.size;
+    pBuffer->memory = allocation.memory;
+    pBuffer->memoryOffset = allocation.offset;
+    pBuffer->memorySize = allocation.size;
 
-    VK_CHECK(vkBindBufferMemory(gfxDevice.device, pBuffer->buffer, pBuffer->memory, 0));
+    VK_CHECK(vkBindBufferMemory(gfxDevice.device, pBuffer->buffer, pBuffer->memory, pBuffer->memoryOffset));
 
-    // Map memory if memory is host coherent
+    // Host coherent memory stays mapped
     if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-        VK_CHECK(vkMapMemory(gfxDevice.device, pBuffer->memory, 0, size, 0, &pBuffer->pHostMap));
+        pBuffer->pHostMap = allocation.pMapped;
     }
 }
 
 // Release a buffer that the device is known to be done with
 static void releaseBuffer(GfxBuffer* pBuffer)
 {
-    if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-        vkUnmapMemory(gfxDevice.device, pBuffer->memory);
-    }
-
     vkDestroyBuffer(gfxDevice.device, pBuffer->buffer, NULL);
-    vkFreeMemory(gfxDevice.device, pBuffer->memory, NULL);
+    freeMemory(pBuffer->memory, pBuffer->memoryOffset, pBuffer->memorySize);
 
     GFX_RESET(pBuffer);
 }
@@ -3570,18 +3845,34 @@ void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels,
 
     VK_CHECK(vkCreateImage(gfxDevice.device, &ci, NULL, &pImage->image));
 
-    VkMemoryRequirements memReqs;
-    vkGetImageMemoryRequirements(gfxDevice.device, pImage->image, &memReqs);
-
-    VkMemoryAllocateInfo allocInfo = {
-        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-        .allocationSize = memReqs.size,
-        .memoryTypeIndex = gfxFindMemoryType(memReqs.memoryTypeBits, properties),
+    VkMemoryDedicatedRequirements dedicatedRequirements = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS,
     };
+    VkMemoryRequirements2 requirements = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+        .pNext = &dedicatedRequirements,
+    };
+    VkImageMemoryRequirementsInfo2 requirementsInfo = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+        .image = pImage->image,
+    };
+    vkGetImageMemoryRequirements2(gfxDevice.device, &requirementsInfo, &requirements);
 
-    VK_CHECK(vkAllocateMemory(gfxDevice.device, &allocInfo, NULL, &pImage->memory));
+    // Drivers often want render targets alone, which lets them compress them
+    VkMemoryDedicatedAllocateInfo dedicatedInfo = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+        .image = pImage->image,
+    };
+    GfxMemoryAllocation allocation = allocateMemory(
+        &requirements.memoryRequirements, properties, tiling == VK_IMAGE_TILING_OPTIMAL,
+        dedicatedRequirements.prefersDedicatedAllocation || dedicatedRequirements.requiresDedicatedAllocation,
+        &dedicatedInfo);
 
-    VK_CHECK(vkBindImageMemory(gfxDevice.device, pImage->image, pImage->memory, 0));
+    pImage->memory = allocation.memory;
+    pImage->memoryOffset = allocation.offset;
+    pImage->memorySize = allocation.size;
+
+    VK_CHECK(vkBindImageMemory(gfxDevice.device, pImage->image, pImage->memory, pImage->memoryOffset));
 }
 
 void gfxDestroyImage(GfxImage* pImage)
@@ -3590,9 +3881,9 @@ void gfxDestroyImage(GfxImage* pImage)
     gfxFlushUploads(true);
     vkDeviceWaitIdle(gfxDevice.device);
 
-    vkFreeMemory(gfxDevice.device, pImage->memory, NULL);
     vkDestroyImageView(gfxDevice.device, pImage->imageView, NULL);
     vkDestroyImage(gfxDevice.device, pImage->image, NULL);
+    freeMemory(pImage->memory, pImage->memoryOffset, pImage->memorySize);
     gfxDevice.resourceGeneration++;
 
     GFX_RESET(pImage);
@@ -6856,14 +7147,21 @@ void gfxSetDebugName(VkObjectType type, uint64_t handle, const char* pName)
 void gfxSetBufferName(const GfxBuffer* pBuffer, const char* pName)
 {
     gfxSetDebugName(VK_OBJECT_TYPE_BUFFER, (uint64_t)pBuffer->buffer, pName);
-    gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pBuffer->memory, pName);
+
+    // Memory shared with other resources keeps the name of its block
+    if (!findMemoryBlock(pBuffer->memory)) {
+        gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pBuffer->memory, pName);
+    }
 }
 
 void gfxSetImageName(const GfxImage* pImage, const char* pName)
 {
     gfxSetDebugName(VK_OBJECT_TYPE_IMAGE, (uint64_t)pImage->image, pName);
     gfxSetDebugName(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)pImage->imageView, pName);
-    gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pImage->memory, pName);
+
+    if (!findMemoryBlock(pImage->memory)) {
+        gfxSetDebugName(VK_OBJECT_TYPE_DEVICE_MEMORY, (uint64_t)pImage->memory, pName);
+    }
 }
 
 void gfxCmdBeginLabel(VkCommandBuffer cmd, const char* pName)
