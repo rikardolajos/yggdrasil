@@ -25,7 +25,7 @@ float lightVisibility()
     float visibility = 0.0;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
-            visibility += texture(shadowMap, vec3(shadowCoord + vec2(x, y) * texelSize, ndc.z));
+            visibility += texture(shadowMap, vec3(shadowCoord + vec2(x, y) * texelSize, ndc.z - 0.0001));
         }
     }
     return visibility / 9.0;
