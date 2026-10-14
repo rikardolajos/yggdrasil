@@ -326,12 +326,11 @@ typedef struct GfxSwapchain {
 // buffers and offsets than many small buffers, that would cause many small
 // allocations. Buffers are created with gfxCreateBuffer(). Copy data from host
 // to the device allocated buffer with gfxCopyBufferFromHost(). A buffer with
-// host coherent memory will always be mapped on pHostMap. When copying buffers
-// from host to device with a non-host coherent memory, a staging buffer will be
-// used. Data that changes every frame belongs in a per-frame buffer, created
-// with gfxCreatePerFrameBuffer(), which holds one copy per frame in flight.
-// Write this frame's copy through gfxGetPerFrameData(); shaders the buffer is
-// attached to read the copy of the frame they are recorded in. Release
+// host coherent memory will always be mapped on pHostMap. Copies to buffers
+// with memory that is not host coherent go through staging memory and are
+// batched with other uploads, see gfxFlushUploads(). Data that changes every frame belongs in a per-frame buffer,
+// created with gfxCreatePerFrameBuffer(), which holds one copy per frame in flight. Write this frame's copy through
+// gfxGetPerFrameData(); shaders the buffer is attached to read the copy of the frame they are recorded in. Release
 // resources with gfxDestroyBuffer().
 typedef struct GfxBuffer {
     VkBuffer buffer;
@@ -842,8 +841,11 @@ void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryProper
 void gfxDestroyBuffer(GfxBuffer* pBuffer);
 
 /// <summary>
-/// Copy data from host memory to a buffer's device memory. If buffer's memory
-/// is not host coherent, a staging buffer will be used.
+/// Copy data from host memory to a buffer's device memory. If the buffer's
+/// memory is host coherent the data is written right away, otherwise it is
+/// copied to staging memory and the copy to the buffer is recorded with other
+/// uploads, see gfxFlushUploads(). Either way pData can be reused when the
+/// function returns.
 /// </summary>
 /// <param name="pBuffer">Buffer to use</param>
 /// <param name="pData">Pointer to data to copy</param>
@@ -920,7 +922,8 @@ void gfxCreateImageView(GfxImage* pImage, VkImageAspectFlags aspectFlags, VkImag
 
 /// <summary>
 /// Copy the first mip level and array layer of an image to host memory. The
-/// copy is submitted and waited for, after all work submitted before it.
+/// copy is submitted and waited for, after all work submitted before it,
+/// including pending uploads.
 /// </summary>
 /// <param name="pImage">Image to copy</param>
 /// <param name="layout">Layout the image is in, which it is left in</param>
@@ -1228,7 +1231,9 @@ void gfxCmdDispatch(VkCommandBuffer cmd, const GfxShader* pShader, uint32_t x, u
 
 /// <summary>
 /// Create a bottom level acceleration structure from triangle geometry. The
-/// build is submitted and waited for.
+/// build is recorded with other uploads, after any upload of the geometry
+/// before it, see gfxFlushUploads(). Builds of several structures can overlap on
+/// the device.
 /// </summary>
 /// <param name="geometryCount">Number of geometries</param>
 /// <param name="pGeometries">List of geometries</param>
@@ -1239,7 +1244,8 @@ void gfxCreateBLAS(uint32_t geometryCount, const GfxGeometryDesc* pGeometries,
 
 /// <summary>
 /// Create a top level acceleration structure from instances of bottom level
-/// acceleration structures. The build is submitted and waited for. Use
+/// acceleration structures. The build is recorded with other uploads, after the
+/// builds of bottom level structures before it, see gfxFlushUploads(). Use
 /// gfxAccelerationStructureInstance() to fill in instances.
 /// </summary>
 /// <param name="instanceCount">Number of instances, also the most that later updates can have</param>
@@ -1463,6 +1469,38 @@ void gfxCmdEndTimer(VkCommandBuffer cmd);
 /// gfxAcquireNextImage()</param> <returns>Number of results, 0 before the first frame has finished</returns>
 uint32_t gfxGetTimerResults(const GfxTimerResult** ppResults);
 
+// Size of the staging memory of an upload batch. A batch is submitted when its
+// staging memory is full, and larger uploads get staging memory of their own.
+#ifndef GFX_UPLOAD_STAGING_SIZE
+#define GFX_UPLOAD_STAGING_SIZE (32ull * 1024 * 1024)
+#endif
+
+// Number of upload batches that can be in flight before recording another
+// waits for the oldest to finish
+#ifndef GFX_UPLOAD_BATCHES
+#define GFX_UPLOAD_BATCHES 3
+#endif
+
+/// <summary>
+/// Submit the uploads recorded so far, and optionally wait for them.
+///
+/// Uploads that go through the device, copies to buffers that are not host
+/// coherent, texture data with its mipmaps, and acceleration structure builds,
+/// are recorded into a batch instead of being waited for one by one. The data
+/// is copied to staging memory right away, so the caller's memory can be
+/// reused as soon as the call returns. A batch is submitted on the same queue
+/// as the frames, with barriers that order it after everything submitted
+/// before it and before everything submitted after it, so frames and command
+/// buffers see the uploads without waiting for them.
+///
+/// Batches are submitted by gfxPresent() before the frame, by gfxCmdEnd(), by
+/// the destroy functions, and when the staging memory of a batch is full. Call
+/// this before submitting command buffers of your own that use the uploads, or
+/// with wait to have them finished, for instance before measuring load times.
+/// </summary>
+/// <param name="wait">Whether to wait for every submitted upload to finish</param>
+void gfxFlushUploads(bool wait);
+
 // Inlined helper functions //
 
 /// <summary>
@@ -1521,7 +1559,8 @@ static inline VkCommandBuffer gfxCmdBegin()
 }
 
 /// <summary>
-/// Submit and destroy a one-time-use command buffer.
+/// Submit a one-time-use command buffer, after any pending uploads, wait for it
+/// and destroy it.
 /// </summary>
 /// <param name="cmd">Command buffer to submit and destroy</param>
 static inline void gfxCmdEnd(VkCommandBuffer cmd)
@@ -1531,6 +1570,8 @@ static inline void gfxCmdEnd(VkCommandBuffer cmd)
     }
 
     VK_CHECK(vkEndCommandBuffer(cmd));
+
+    gfxFlushUploads(false);
 
     VkSubmitInfo si = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
@@ -1831,6 +1872,33 @@ static struct GfxTimers {
     uint32_t resultCount;
     GfxTimerResult results[GFX_MAX_TIMERS];
 } gfxTimers;
+
+// Uploads recorded into one command buffer and submitted with a fence. The
+// staging memory is kept and reused, and the retired buffers are released,
+// once the fence has signaled.
+typedef struct GfxUploadBatch {
+    VkCommandBuffer cmd;
+    VkFence fence;
+    bool submitted;    // Submitted and not yet seen to have finished
+    GfxBuffer staging; // Created the first time it is needed
+    VkDeviceSize used; // Bytes of the staging memory taken
+    uint32_t retiredCount;
+    uint32_t retiredCapacity;
+    GfxBuffer* pRetired; // Released when the batch has finished
+    uint32_t writtenCount;
+    uint32_t writtenCapacity;
+    VkBuffer* pWritten; // Buffers copied to since the last barrier between copies
+    bool transferred;   // Whether copies were recorded since the last barrier before builds
+    bool built;         // Whether builds were recorded since the last barrier before copies
+} GfxUploadBatch;
+
+static struct GfxUploads {
+    GfxUploadBatch batches[GFX_UPLOAD_BATCHES];
+    uint32_t current; // Batch being recorded, or the one recorded next
+    bool recording;
+} gfxUploads;
+
+static void destroyUploadBatches();
 
 
 // Helper macros //
@@ -2462,6 +2530,7 @@ void gfxDestroyDevice()
         GFX_ERROR("Device not initialized");
     }
 
+    destroyUploadBatches();
     vkDeviceWaitIdle(gfxDevice.device);
 
     if (gfxDevice.commandPool) {
@@ -2968,7 +3037,7 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
     // Transition swapchain image for blitting. The image comes from the
     // presentation engine, so the acquire semaphore provides the source
     // dependency.
-    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+    gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     gfxSwapchain.images[gfxSwapchain.imageIndex], NULL);
 
@@ -3019,6 +3088,10 @@ void gfxPresent(VkCommandBuffer cmd, GfxImage* pImage)
     }
 
     VK_CHECK(vkEndCommandBuffer(cmd));
+
+    // Uploads recorded until now are submitted ahead of the frame, which may
+    // use them
+    gfxFlushUploads(false);
 
     // The first use of the acquired image is the blit above, so the acquire
     // semaphore has to be waited on before the transfer stage
@@ -3109,50 +3182,310 @@ void gfxCreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryProper
     }
 }
 
-void gfxDestroyBuffer(GfxBuffer* pBuffer)
+// Release a buffer that the device is known to be done with
+static void releaseBuffer(GfxBuffer* pBuffer)
 {
-    vkDeviceWaitIdle(gfxDevice.device);
-
     if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
         vkUnmapMemory(gfxDevice.device, pBuffer->memory);
     }
 
     vkDestroyBuffer(gfxDevice.device, pBuffer->buffer, NULL);
     vkFreeMemory(gfxDevice.device, pBuffer->memory, NULL);
-    gfxDevice.resourceGeneration++;
 
     GFX_RESET(pBuffer);
 }
 
+void gfxDestroyBuffer(GfxBuffer* pBuffer)
+{
+    // A pending upload may still copy to the buffer or read it
+    gfxFlushUploads(true);
+    vkDeviceWaitIdle(gfxDevice.device);
+
+    releaseBuffer(pBuffer);
+    gfxDevice.resourceGeneration++;
+}
+
+// Upload batches //
+
+static void finishUploadBatch(GfxUploadBatch* pBatch)
+{
+    for (uint32_t i = 0; i < pBatch->retiredCount; i++) {
+        releaseBuffer(&pBatch->pRetired[i]);
+    }
+    pBatch->retiredCount = 0;
+
+    VK_CHECK(vkResetFences(gfxDevice.device, 1, &pBatch->fence));
+    pBatch->submitted = false;
+}
+
+// Finish the batches whose fences have signaled, or with wait, every submitted
+// batch
+static void recycleUploadBatches(bool wait)
+{
+    for (uint32_t i = 0; i < GFX_UPLOAD_BATCHES; i++) {
+        GfxUploadBatch* pBatch = &gfxUploads.batches[i];
+        if (!pBatch->submitted) {
+            continue;
+        }
+
+        if (wait) {
+            VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &pBatch->fence, VK_TRUE, UINT64_MAX));
+        } else if (vkGetFenceStatus(gfxDevice.device, pBatch->fence) != VK_SUCCESS) {
+            continue;
+        }
+
+        finishUploadBatch(pBatch);
+    }
+}
+
+// Get the command buffer of the batch being recorded, and begin recording one
+// if there is none. A batch is reused once the one submitted
+// GFX_UPLOAD_BATCHES batches ago has finished.
+static VkCommandBuffer uploadCommandBuffer()
+{
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+
+    if (gfxUploads.recording) {
+        return pBatch->cmd;
+    }
+
+    if (!pBatch->cmd) {
+        VkCommandBufferAllocateInfo ai = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = gfxDevice.commandPool,
+            .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        VK_CHECK(vkAllocateCommandBuffers(gfxDevice.device, &ai, &pBatch->cmd));
+        gfxSetDebugName(VK_OBJECT_TYPE_COMMAND_BUFFER, (uint64_t)(uintptr_t)pBatch->cmd, "Uploads");
+
+        VkFenceCreateInfo fci = {
+            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        };
+        VK_CHECK(vkCreateFence(gfxDevice.device, &fci, NULL, &pBatch->fence));
+    }
+
+    if (pBatch->submitted) {
+        VK_CHECK(vkWaitForFences(gfxDevice.device, 1, &pBatch->fence, VK_TRUE, UINT64_MAX));
+        finishUploadBatch(pBatch);
+    }
+
+    VkCommandBufferBeginInfo bi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    VK_CHECK(vkBeginCommandBuffer(pBatch->cmd, &bi));
+
+    pBatch->used = 0;
+    pBatch->writtenCount = 0;
+    pBatch->transferred = false;
+    pBatch->built = false;
+    gfxUploads.recording = true;
+
+    gfxCmdBeginLabel(pBatch->cmd, "Uploads");
+
+    // Work submitted before the batch, frames in flight included, may still use
+    // what the batch writes
+    gfxMemoryBarrier(pBatch->cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+
+    return pBatch->cmd;
+}
+
+static void submitUploadBatch()
+{
+    if (!gfxUploads.recording) {
+        return;
+    }
+
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+
+    // Work submitted after the batch sees what it wrote. Barriers reach later
+    // submissions to the same queue, so no semaphore is needed.
+    gfxMemoryBarrier(pBatch->cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+
+    gfxCmdEndLabel(pBatch->cmd);
+    VK_CHECK(vkEndCommandBuffer(pBatch->cmd));
+
+    VkSubmitInfo si = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &pBatch->cmd,
+    };
+    VK_CHECK(vkQueueSubmit(gfxDevice.queue, 1, &si, pBatch->fence));
+
+    pBatch->submitted = true;
+    gfxUploads.recording = false;
+    gfxUploads.current = (gfxUploads.current + 1) % GFX_UPLOAD_BATCHES;
+}
+
+void gfxFlushUploads(bool wait)
+{
+    if (!gfxDevice.device) {
+        return;
+    }
+
+    submitUploadBatch();
+    recycleUploadBatches(wait);
+}
+
+static void destroyUploadBatches()
+{
+    gfxFlushUploads(true);
+
+    // The command buffers are freed with the command pool
+    for (uint32_t i = 0; i < GFX_UPLOAD_BATCHES; i++) {
+        GfxUploadBatch* pBatch = &gfxUploads.batches[i];
+        if (pBatch->staging.buffer) {
+            releaseBuffer(&pBatch->staging);
+        }
+        if (pBatch->fence) {
+            vkDestroyFence(gfxDevice.device, pBatch->fence, NULL);
+        }
+        GFX_FREE(pBatch->pRetired);
+        GFX_FREE(pBatch->pWritten);
+    }
+
+    GFX_RESET(&gfxUploads);
+}
+
+// Release a buffer when the batch being recorded has finished
+static void retireBuffer(const GfxBuffer* pBuffer)
+{
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+
+    if (pBatch->retiredCount == pBatch->retiredCapacity) {
+        pBatch->retiredCapacity = pBatch->retiredCapacity ? pBatch->retiredCapacity * 2 : 4;
+        pBatch->pRetired = GFX_REALLOC(pBatch->pRetired, pBatch->retiredCapacity * sizeof *pBatch->pRetired);
+    }
+
+    pBatch->pRetired[pBatch->retiredCount++] = *pBuffer;
+}
+
+typedef struct GfxStaging {
+    VkBuffer buffer;
+    VkDeviceSize offset;
+    void* pData;
+} GfxStaging;
+
+// Take staging memory in the batch being recorded, beginning a new batch if the
+// current one has no room left. Copies to images need offsets that are
+// multiples of the texel size, so offsets are multiples of both it and 16.
+static GfxStaging allocateStaging(VkDeviceSize size, VkDeviceSize texelSize)
+{
+    VkDeviceSize alignment = 16;
+    while (texelSize && alignment % texelSize) {
+        alignment += 16;
+    }
+
+    uploadCommandBuffer();
+
+    if (size > GFX_UPLOAD_STAGING_SIZE) {
+        GfxBuffer buffer;
+        gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &buffer);
+        gfxSetBufferName(&buffer, "Upload staging");
+        retireBuffer(&buffer);
+        return (GfxStaging){.buffer = buffer.buffer, .offset = 0, .pData = buffer.pHostMap};
+    }
+
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+    if ((pBatch->used + alignment - 1) / alignment * alignment + size > GFX_UPLOAD_STAGING_SIZE) {
+        submitUploadBatch();
+        uploadCommandBuffer();
+        pBatch = &gfxUploads.batches[gfxUploads.current];
+    }
+
+    if (!pBatch->staging.buffer) {
+        gfxCreateBuffer(GFX_UPLOAD_STAGING_SIZE, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &pBatch->staging);
+        gfxSetBufferName(&pBatch->staging, "Upload staging");
+    }
+
+    VkDeviceSize offset = (pBatch->used + alignment - 1) / alignment * alignment;
+    pBatch->used = offset + size;
+
+    return (GfxStaging){
+        .buffer = pBatch->staging.buffer,
+        .offset = offset,
+        .pData = (char*)pBatch->staging.pHostMap + offset,
+    };
+}
+
+// Order a copy to a buffer in the batch being recorded after the builds that
+// may read the buffer, and after earlier copies to the same buffer, which could
+// otherwise run in any order
+static void beforeUploadCopy(VkBuffer buffer)
+{
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+
+    if (pBatch->built) {
+        gfxMemoryBarrier(pBatch->cmd, VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_2_NONE,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        pBatch->built = false;
+    }
+
+    for (uint32_t i = 0; i < pBatch->writtenCount; i++) {
+        if (pBatch->pWritten[i] == buffer) {
+            gfxMemoryBarrier(pBatch->cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            pBatch->writtenCount = 0;
+            break;
+        }
+    }
+
+    if (pBatch->writtenCount == pBatch->writtenCapacity) {
+        pBatch->writtenCapacity = pBatch->writtenCapacity ? pBatch->writtenCapacity * 2 : 16;
+        pBatch->pWritten = GFX_REALLOC(pBatch->pWritten, pBatch->writtenCapacity * sizeof *pBatch->pWritten);
+    }
+    pBatch->pWritten[pBatch->writtenCount++] = buffer;
+    pBatch->transferred = true;
+}
+
+// Order a build in the batch being recorded after the copies before it, which
+// may have uploaded its geometry. Builds after each other are not ordered, so
+// they can overlap.
+static void beforeUploadBuild()
+{
+    GfxUploadBatch* pBatch = &gfxUploads.batches[gfxUploads.current];
+
+    if (pBatch->transferred) {
+        gfxMemoryBarrier(pBatch->cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                             VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        pBatch->transferred = false;
+        pBatch->writtenCount = 0;
+    }
+
+    pBatch->built = true;
+}
+
 void gfxCopyBufferFromHost(const GfxBuffer* pBuffer, const void* pData, VkDeviceSize size, VkDeviceSize offset)
 {
-    // Check if we need a staging buffer or not
-    if (!(pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
-        // Set up staging buffer
-        GfxBuffer staging;
-        gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging);
-
-        // Copy to staging buffer
-        gfxCopyBufferFromHost(&staging, pData, size, 0);
-
-        // Transfer from staging buffer to this buffer
-        VkCommandBuffer cmd = gfxCmdBegin();
-
-        VkBufferCopy region = {
-            .dstOffset = offset,
-            .size = size,
-        };
-        vkCmdCopyBuffer(cmd, staging.buffer, pBuffer->buffer, 1, &region);
-
-        gfxCmdEnd(cmd);
-
-        gfxDestroyBuffer(&staging);
-    } else {
-        // Transfer directly without staging buffer
-        char* pOffsettedHostMap = (char*)pBuffer->pHostMap + offset;
-        memcpy(pOffsettedHostMap, pData, size);
+    // Host coherent memory is written directly
+    if (pBuffer->properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
+        memcpy((char*)pBuffer->pHostMap + offset, pData, size);
+        return;
     }
+
+    if (!size) {
+        return;
+    }
+
+    GfxStaging staging = allocateStaging(size, 0);
+    memcpy(staging.pData, pData, size);
+
+    VkCommandBuffer cmd = uploadCommandBuffer();
+    beforeUploadCopy(pBuffer->buffer);
+
+    VkBufferCopy region = {
+        .srcOffset = staging.offset,
+        .dstOffset = offset,
+        .size = size,
+    };
+    vkCmdCopyBuffer(cmd, staging.buffer, pBuffer->buffer, 1, &region);
 }
 
 VkDeviceAddress gfxGetBufferDeviceAddress(const GfxBuffer* pBuffer)
@@ -3253,6 +3586,8 @@ void gfxCreateImage(VkExtent3D extent, uint32_t arrayLayers, uint32_t mipLevels,
 
 void gfxDestroyImage(GfxImage* pImage)
 {
+    // A pending upload may still write the image
+    gfxFlushUploads(true);
     vkDeviceWaitIdle(gfxDevice.device);
 
     vkFreeMemory(gfxDevice.device, pImage->memory, NULL);
@@ -3394,7 +3729,7 @@ bool gfxSaveImagePNG(const GfxImage* pImage, VkImageLayout layout, const char* p
 }
 #endif
 
-static void generateMipmaps(GfxTexture* pTexture)
+static void generateMipmaps(VkCommandBuffer cmd, GfxTexture* pTexture)
 {
     VkFormatProperties props;
     vkGetPhysicalDeviceFormatProperties(gfxDevice.physicalDevice, pTexture->image.format, &props);
@@ -3402,8 +3737,6 @@ static void generateMipmaps(GfxTexture* pTexture)
     if (!(props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
         GFX_ERROR("Texture image format does not support linear blitting");
     }
-
-    VkCommandBuffer cmd = gfxCmdBegin();
 
     VkImageSubresourceRange subresourceRange = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3475,8 +3808,6 @@ static void generateMipmaps(GfxTexture* pTexture)
                     VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     pTexture->image.image, &subresourceRange);
-
-    gfxCmdEnd(cmd);
 }
 
 static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkFormat format, const void* pData,
@@ -3543,20 +3874,19 @@ static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkForm
         // Widen before multiplying, so large textures do not overflow
         VkDeviceSize size = (VkDeviceSize)extent.width * extent.height * extent.depth * arrayLayers * texelSize;
 
-        GfxBuffer staging;
-        gfxCreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &staging);
+        // The copy, the mipmaps and the final transition are recorded with
+        // other uploads
+        GfxStaging staging = allocateStaging(size, texelSize);
+        memcpy(staging.pData, pData, size);
 
-        gfxCopyBufferFromHost(&staging, pData, size, 0);
-
-        VkCommandBuffer cmd = gfxCmdBegin();
+        VkCommandBuffer cmd = uploadCommandBuffer();
 
         gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                         VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         pTexture->image.image, NULL);
 
         VkBufferImageCopy region = {
-            .bufferOffset = 0,
+            .bufferOffset = staging.offset,
             .bufferRowLength = 0,
             .bufferImageHeight = 0,
             .imageSubresource = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -3570,20 +3900,16 @@ static void createTexture(GfxTexture* pTexture, enum GfxTextureType type, VkForm
         vkCmdCopyBufferToImage(cmd, staging.buffer, pTexture->image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                                &region);
 
-        gfxCmdEnd(cmd);
-
+        // The barrier at the end of the batch makes the image visible to every
+        // stage of later work
         if (mipmaps) {
-            generateMipmaps(pTexture);
+            generateMipmaps(cmd, pTexture);
         } else {
-            cmd = gfxCmdBegin();
             gfxImageBarrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT,
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                             pTexture->image.image, NULL);
-            gfxCmdEnd(cmd);
         }
-
-        gfxDestroyBuffer(&staging);
     }
 
     gfxCreateImageView(&pTexture->image, VK_IMAGE_ASPECT_COLOR_BIT, viewType);
@@ -5985,19 +6311,19 @@ void gfxCreateBLAS(uint32_t geometryCount, const GfxGeometryDesc* pGeometries,
                                 sizes.accelerationStructureSize);
 
     // Bottom level structures are not updated, so the scratch memory is only
-    // needed for the build
+    // needed for the build, and is released when the upload batch has finished
     GfxBuffer scratch;
     createScratchBuffer(sizes.buildScratchSize, &scratch);
 
     buildInfo.dstAccelerationStructure = pBLAS->accelerationStructure;
     buildInfo.scratchData.deviceAddress = scratchAddress(&scratch);
 
-    VkCommandBuffer cmd = gfxCmdBegin();
+    VkCommandBuffer cmd = uploadCommandBuffer();
+    beforeUploadBuild();
     const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfos = pRanges;
     gfxDevice.fn.vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfos);
-    gfxCmdEnd(cmd);
 
-    gfxDestroyBuffer(&scratch);
+    retireBuffer(&scratch);
 
 done:
     GFX_FREE(pPrimitiveCounts);
@@ -6118,9 +6444,11 @@ void gfxCreateTLAS(uint32_t instanceCount, const VkAccelerationStructureInstance
     // The scratch memory is kept, since later updates and rebuilds need it
     createScratchBuffer(GFX_MAX(sizes.buildScratchSize, sizes.updateScratchSize), &pTLAS->scratch);
 
-    VkCommandBuffer cmd = gfxCmdBegin();
+    // The build starts with a barrier after the builds of the bottom level
+    // structures it holds
+    VkCommandBuffer cmd = uploadCommandBuffer();
+    beforeUploadBuild();
     cmdBuildTLAS(cmd, pTLAS, instanceCount, pInstances, false);
-    gfxCmdEnd(cmd);
 }
 
 void gfxCmdUpdateTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, uint32_t instanceCount,
@@ -6147,6 +6475,8 @@ void gfxCmdUpdateTLAS(VkCommandBuffer cmd, GfxAccelerationStructure* pTLAS, uint
 
 void gfxDestroyAccelerationStructure(GfxAccelerationStructure* pAccelerationStructure)
 {
+    // A pending upload may still build the structure
+    gfxFlushUploads(true);
     vkDeviceWaitIdle(gfxDevice.device);
 
     if (pAccelerationStructure->accelerationStructure) {
