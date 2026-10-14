@@ -83,6 +83,9 @@ Initialization follows a fixed order:
    in `gfxDestroyDevice()`.
 5. Create the swapchain with a callback that reports the framebuffer size.
 
+`GFX_DEFAULT_DEVICE` selects the first supported discrete GPU. `gfxEnumerateDevices()` is provided
+to list all supported devices available on the system.
+
 A minimal program using GLFW, condensed from the [rasterizer example](examples/rasterizer/main.c).
 It draws a triangle whose vertices are generated in the vertex shader from `gl_VertexIndex`:
 

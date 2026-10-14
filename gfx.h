@@ -224,6 +224,18 @@ typedef struct GfxDeviceProperties {
     VkPhysicalDeviceAccelerationStructurePropertiesKHR accelerationStructure;
 } GfxDeviceProperties;
 
+// Description of a physical device, as listed by gfxEnumerateDevices(). A
+// device is supported if it has Vulkan 1.3, shader objects and a queue that
+// gfxCreateDevice() can use, which must also be able to present to the
+// surface if one was given.
+typedef struct GfxDeviceInfo {
+    char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
+    uint8_t uuid[VK_UUID_SIZE]; // Same across runs and driver versions
+    VkPhysicalDeviceType type;
+    uint32_t apiVersion;
+    bool supported;
+} GfxDeviceInfo;
+
 // Device level function pointers for extensions that the Vulkan loader does not
 // export directly. Resolved once by gfxCreateDevice() instead of on every call.
 // Call them through gfxDevice.fn, for instance:
@@ -772,14 +784,29 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 /// </summary>
 void gfxDestroyInstance();
 
-// Pass to gfxCreateDevice() to pick the first discrete GPU, or the first
-// device if there is no discrete GPU
+/// <summary>
+/// List the physical devices of the instance, for instance to let the user
+/// pick one. The index of a device in the list is what gfxCreateDevice() takes.
+/// Indices can change between runs, so remember a choice by its UUID. Works
+/// like Vulkan's enumerate functions: with pDevices NULL the number of devices
+/// is returned in pDeviceCount, otherwise at most *pDeviceCount devices are
+/// written and pDeviceCount is set to the number written.
+/// </summary>
+/// <param name="surface">Surface the device must be able to present to for it to be supported, can be
+/// VK_NULL_HANDLE</param>
+/// <param name="pDeviceCount">Number of devices</param>
+/// <param name="pDevices">Where the device descriptions will be stored, can be NULL</param>
+void gfxEnumerateDevices(VkSurfaceKHR surface, uint32_t* pDeviceCount, GfxDeviceInfo* pDevices);
+
+// Pass to gfxCreateDevice() to pick the first supported discrete GPU, or the
+// first supported device if there is no supported discrete GPU. Supported is
+// as reported by gfxEnumerateDevices() for the surface.
 #define GFX_DEFAULT_DEVICE UINT32_MAX
 
 /// <summary>
 /// Create a new device. Handle is internally managed and accessible through
 /// gfxDevice. The available devices are listed with their indices when it is
-/// created.
+/// created, and can be listed beforehand with gfxEnumerateDevices().
 ///
 /// The extensions and features that yggdrasil uses are always enabled, and
 /// ray tracing and anisotropic filtering are enabled when the device supports
@@ -2177,12 +2204,12 @@ static bool checkDeviceExtensionSupport(uint32_t deviceExtensionCount, const cha
     return result;
 }
 
-static bool deviceExtensionAvailable(const char* pName)
+static bool deviceExtensionAvailable(VkPhysicalDevice physicalDevice, const char* pName)
 {
     uint32_t n;
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(gfxDevice.physicalDevice, NULL, &n, NULL));
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(physicalDevice, NULL, &n, NULL));
     VkExtensionProperties* pAvailable = GFX_MALLOC(n * sizeof *pAvailable);
-    VK_CHECK(vkEnumerateDeviceExtensionProperties(gfxDevice.physicalDevice, NULL, &n, pAvailable));
+    VK_CHECK(vkEnumerateDeviceExtensionProperties(physicalDevice, NULL, &n, pAvailable));
 
     bool found = false;
     for (uint32_t i = 0; i < n && !found; i++) {
@@ -2284,6 +2311,100 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamil
     return index;
 }
 
+// Whether gfxCreateDevice() would accept a physical device, checked the same
+// way it checks the chosen one
+static bool deviceSupported(VkPhysicalDevice physicalDevice, uint32_t apiVersion, VkSurfaceKHR surface)
+{
+    if (apiVersion < VK_API_VERSION_1_3 ||
+        !deviceExtensionAvailable(physicalDevice, VK_EXT_SHADER_OBJECT_EXTENSION_NAME) ||
+        (surface && !deviceExtensionAvailable(physicalDevice, VK_KHR_SWAPCHAIN_EXTENSION_NAME))) {
+        return false;
+    }
+
+    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+    };
+
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &shaderObjectFeatures,
+    };
+
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+    if (!shaderObjectFeatures.shaderObject) {
+        return false;
+    }
+
+    // The device uses the first queue family that has graphics, compute and
+    // transfer, which also has to present
+    uint32_t n;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &n, NULL);
+    VkQueueFamilyProperties* pProps = GFX_MALLOC(n * sizeof *pProps);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &n, pProps);
+
+    const VkQueueFlags required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+    uint32_t index = 0;
+    while (index < n && (pProps[index].queueFlags & required) != required) {
+        index++;
+    }
+
+    GFX_FREE(pProps);
+
+    if (index == n) {
+        return false;
+    }
+
+    VkBool32 present = VK_TRUE;
+    if (surface) {
+        VK_CHECK(vkGetPhysicalDeviceSurfaceSupportKHR(physicalDevice, index, surface, &present));
+    }
+
+    return present;
+}
+
+void gfxEnumerateDevices(VkSurfaceKHR surface, uint32_t* pDeviceCount, GfxDeviceInfo* pDevices)
+{
+    if (!gfxInstance.instance) {
+        GFX_ERROR("Instance not initialized");
+    }
+
+    uint32_t n;
+    VK_CHECK(vkEnumeratePhysicalDevices(gfxInstance.instance, &n, NULL));
+
+    if (!pDevices) {
+        *pDeviceCount = n;
+        return;
+    }
+
+    VkPhysicalDevice* pPhysicalDevices = GFX_MALLOC(n * sizeof *pPhysicalDevices);
+    VK_CHECK(vkEnumeratePhysicalDevices(gfxInstance.instance, &n, pPhysicalDevices));
+
+    n = GFX_MIN(n, *pDeviceCount);
+    for (uint32_t i = 0; i < n; i++) {
+        VkPhysicalDeviceIDProperties id = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES,
+        };
+
+        VkPhysicalDeviceProperties2 prop = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &id,
+        };
+
+        vkGetPhysicalDeviceProperties2(pPhysicalDevices[i], &prop);
+
+        GfxDeviceInfo* pInfo = &pDevices[i];
+        memcpy(pInfo->name, prop.properties.deviceName, sizeof pInfo->name);
+        memcpy(pInfo->uuid, id.deviceUUID, sizeof pInfo->uuid);
+        pInfo->type = prop.properties.deviceType;
+        pInfo->apiVersion = prop.properties.apiVersion;
+        pInfo->supported = deviceSupported(pPhysicalDevices[i], prop.properties.apiVersion, surface);
+    }
+
+    GFX_FREE(pPhysicalDevices);
+
+    *pDeviceCount = n;
+}
+
 void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount, const char** ppDeviceExtensions,
                      VkPhysicalDeviceFeatures2* features, VkSurfaceKHR surface)
 {
@@ -2309,15 +2430,26 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     VK_CHECK(vkEnumeratePhysicalDevices(gfxInstance.instance, &n, pPhysicalDevices));
 
     if (physicalDeviceIndex == GFX_DEFAULT_DEVICE) {
-        // Prefer the first discrete GPU, and settle for the first device
-        physicalDeviceIndex = 0;
-        for (uint32_t i = 0; i < n; i++) {
+        // Prefer the first supported discrete GPU, and settle for the first
+        // supported device. If none is supported, the first device is tried so
+        // that the checks below report why.
+        uint32_t firstSupported = UINT32_MAX;
+        physicalDeviceIndex = UINT32_MAX;
+        for (uint32_t i = 0; i < n && physicalDeviceIndex == UINT32_MAX; i++) {
             VkPhysicalDeviceProperties properties;
             vkGetPhysicalDeviceProperties(pPhysicalDevices[i], &properties);
+            if (!deviceSupported(pPhysicalDevices[i], properties.apiVersion, surface)) {
+                continue;
+            }
+            if (firstSupported == UINT32_MAX) {
+                firstSupported = i;
+            }
             if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
                 physicalDeviceIndex = i;
-                break;
             }
+        }
+        if (physicalDeviceIndex == UINT32_MAX) {
+            physicalDeviceIndex = firstSupported == UINT32_MAX ? 0 : firstSupported;
         }
     } else if (physicalDeviceIndex >= n) {
         GFX_ERROR("Device index %" PRIu32 " requested, but there are only %" PRIu32 " devices", physicalDeviceIndex, n);
@@ -2374,9 +2506,10 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     }
 
     // Ray tracing is enabled whenever the device supports it
-    bool rayTracingSupport = deviceExtensionAvailable(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
-                             deviceExtensionAvailable(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
-                             deviceExtensionAvailable(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+    bool rayTracingSupport =
+        deviceExtensionAvailable(gfxDevice.physicalDevice, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+        deviceExtensionAvailable(gfxDevice.physicalDevice, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) &&
+        deviceExtensionAvailable(gfxDevice.physicalDevice, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
 
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rayTracingPipelineSupport = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR,
