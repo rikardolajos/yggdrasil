@@ -57,6 +57,7 @@ static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 
 static void createWindow()
 {
+    glfwInitVulkanLoader(vkGetInstanceProcAddr);
     if (!glfwInit()) {
         GFX_ERROR("Failed to initialize GLFW");
     }

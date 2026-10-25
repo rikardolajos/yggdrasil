@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  examples:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Software Vulkan drivers, as hosted runners have no GPU. Lavapipe has
+          # every dynamic state, so one Linux run bakes them all to cover the
+          # pipelines that devices without them get.
+          - name: Windows (lavapipe)
+            os: windows-latest
+            bake: OFF
+          - name: Linux (lavapipe)
+            os: ubuntu-24.04
+            bake: OFF
+          - name: Linux (lavapipe, baked state)
+            os: ubuntu-24.04
+            bake: ON
+          # KosmicKrisp needs Metal 4, so macOS 26 on Apple Silicon
+          - name: macOS (KosmicKrisp)
+            os: macos-26
+            bake: OFF
+
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev xorg-dev mesa-vulkan-drivers xvfb
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          install_lavapipe: ${{ runner.os == 'Windows' }}
+          cache: true
+
+      # Validation layers report errors, which exit the examples with a
+      # failure status rather than waiting for a debugger
+      - name: Configure
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DGFX_EXIT_ON_ERROR=ON
+          -DGFX_BAKE_PIPELINE_STATE=${{ matrix.bake }}
+
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+
+      - name: Select Vulkan driver and layers
+        run: |
+          case "$RUNNER_OS" in
+            Linux)
+              driver=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+              layers="$VULKAN_SDK/share/vulkan/explicit_layer.d"
+              tools="$VULKAN_SDK/bin"
+              ;;
+            Windows)
+              driver=$(cygpath -w "$(find /c/lavapipe -name '*lvp_icd*.json' | head -n 1)")
+              layers=$(cygpath -w "$VULKAN_SDK/Bin")
+              tools="$VULKAN_SDK/Bin"
+              ;;
+            macOS)
+              driver=$(find "$VULKAN_SDK/.." -name '*kosmickrisp*icd*.json' | head -n 1)
+              layers="$VULKAN_SDK/share/vulkan/explicit_layer.d"
+              tools="$VULKAN_SDK/bin"
+              ;;
+          esac
+          if [ -z "$driver" ]; then
+            echo "::error::No Vulkan driver found"
+            exit 1
+          fi
+          echo "Driver: $driver"
+          echo "VK_DRIVER_FILES=$driver" >> "$GITHUB_ENV"
+          echo "VK_ADD_LAYER_PATH=$layers" >> "$GITHUB_ENV"
+          echo "$tools" >> "$GITHUB_PATH" # vulkaninfo, to tell whether there is ray tracing
+
+      - name: Run examples
+        timeout-minutes: 10
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a bash .github/scripts/run-examples.sh build
+          else
+            bash .github/scripts/run-examples.sh build
+          fi

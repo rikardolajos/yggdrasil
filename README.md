@@ -22,11 +22,12 @@ GLFW and [vecmat](https://github.com/rikardolajos/vecmat).
 
 ## Requirements
 
-- A device supporting Vulkan 1.3, `VK_EXT_extended_dynamic_state3` and
-  `VK_EXT_vertex_input_dynamic_state`. Ray tracing is enabled when supported.
+- A device supporting Vulkan 1.3. `VK_EXT_extended_dynamic_state3` and
+  `VK_EXT_vertex_input_dynamic_state` are used when available. Ray tracing is enabled when
+  supported.
 - The Vulkan SDK, which provides `glslang`, `SPIRV-Tools`, `SPIRV-Tools-opt` and
   `glslang-default-resource-limits`.
-- A C17 compiler on 64-bit Windows or Linux. MSVC requires `/Zc:preprocessor`.
+- A C17 compiler on 64-bit Windows, Linux or macOS. MSVC requires `/Zc:preprocessor`.
 - Optionally, [stb_image and stb_image_write](https://github.com/nothings/stb) for loading
   textures and writing PNGs.
 
@@ -47,6 +48,19 @@ cmake --build yggdrasil/build
 Shaders and textures are copied to each example's build directory and loaded by relative
 path, so each example runs from its own build directory. F5 reloads shaders and F12 saves
 `screenshot.png`.
+
+On macOS, the Vulkan SDK ships two drivers. GFX targets KosmicKrisp, which needs macOS 26 on
+Apple Silicon and is selected by pointing `VK_DRIVER_FILES` at the SDK's
+`libkosmickrisp_icd.json`. MoltenVK, the SDK's default, is enumerated as well but is not
+tested.
+
+### Continuous integration
+
+[`ci.yml`](.github/workflows/ci.yml) builds the examples in debug, with validation layers
+and `GFX_EXIT_ON_ERROR`, and runs each of them for ten seconds on Windows and Linux with the
+lavapipe software driver and on macOS with KosmicKrisp. An example passes if it is still
+running by then, as errors end it early. A second Linux run builds with
+`GFX_BAKE_PIPELINE_STATE`. The raytracer is skipped where the driver has no ray tracing.
 
 | Example | Demonstrates |
 | --- | --- |
@@ -184,24 +198,43 @@ Resources are referenced by pointer and must remain at the same address while at
 
 A graphics shader is bound while rendering, in a graphics pass or between
 `gfxCmdBeginRendering()` and `gfxCmdEndRendering()`. The first time it is bound for a set of
-attachment formats, a pipeline is built for them and kept with the shader. Every other state is
-dynamic, so `gfxCmdSetDefaultStates()` is followed by plain `vkCmdSet*` calls for whatever a
-pass needs, before or after binding.
+attachment formats, a pipeline is built for them and kept with the shader.
+`gfxCmdSetDefaultStates()` sets every state, and the states that Vulkan 1.3 always has
+dynamic, such as depth testing, culling and viewports, are changed with plain `vkCmdSet*`
+calls.
 
-The one exception is the primitive topology class (points, lines or triangles). On devices
-without `dynamicPrimitiveTopologyUnrestricted` it is part of the pipeline, so set it with
-`gfxCmdSetPrimitiveTopology()` before binding the shader:
+Some states are only dynamic with extensions that not every device has, such as KosmicKrisp
+on macOS. GFX bakes those into the pipeline instead, so they are set with GFX functions that
+take the same arguments as the Vulkan commands and work either way:
+
+| State | Function | Dynamic when |
+| --- | --- | --- |
+| Primitive topology class | `gfxCmdSetPrimitiveTopology()` | `gfxDevice.primitiveTopologyUnrestricted` |
+| Vertex bindings and attributes | `gfxCmdSetVertexInput()` | `gfxDevice.dynamicVertexInput` |
+| Sample mask | `gfxCmdSetSampleMask()` | `gfxDevice.dynamicSampleMask` |
+| Alpha to coverage | `gfxCmdSetAlphaToCoverageEnable()` | `gfxDevice.dynamicAlphaToCoverage` |
+| Polygon mode | `gfxCmdSetPolygonMode()` | `gfxDevice.dynamicPolygonMode` |
+| Logic op enable | `gfxCmdSetLogicOpEnable()` | `gfxDevice.dynamicLogicOpEnable` |
+| Blend enable, equation and write mask | `gfxCmdSetColorBlendEnable()`, `gfxCmdSetColorBlendEquation()`, `gfxCmdSetColorWriteMask()` | `gfxDevice.dynamicColorBlend` |
+
+The sample count follows the attachments. When one of these states changes after a shader has
+been bound, the pipeline for the new state is bound in its place, so they can be set before or
+after binding. Setting them before binding avoids building pipelines for combinations that are
+only passed through:
 
 ```c
 gfxCmdSetDefaultStates(cmd, pAttachment, 0, NULL, 0, NULL);
 gfxCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+gfxCmdSetColorBlendEnable(cmd, 0, 1, &(VkBool32){VK_TRUE});
 gfxCmdBindShader(cmd, &shader);
 ```
 
 The logic op, depth clamp and alpha to one are dynamic when the device supports it, as
 reported by `gfxDevice.dynamicLogicOp`, `gfxDevice.dynamicDepthClamp` and
-`gfxDevice.dynamicAlphaToOne`. Patch control points are fixed per shader through
-`GfxShaderStageDesc::patchControlPoints` on the tessellation control stage.
+`gfxDevice.dynamicAlphaToOne`, and are otherwise copy, off and off. Patch control points are
+fixed per shader through `GfxShaderStageDesc::patchControlPoints` on the tessellation control
+stage.
+
 Buffers, textures, multisampling and depth are covered by the rasterizer example; compute
 and ray tracing passes by the particles and raytracer examples.
 
@@ -263,7 +296,12 @@ The following macros are defined before including `gfx.h`:
 | `GFX_UPLOAD_BATCHES` | 3 | Upload batches in flight |
 | `GFX_MAX_PASS_RESOURCES` | 8 | Inputs and outputs per render graph pass |
 | `GFX_MAX_COLOR_ATTACHMENTS` | 8 | Color attachments a graphics pipeline renders to |
+| `GFX_MAX_VERTEX_BINDINGS`, `GFX_MAX_VERTEX_ATTRIBUTES` | 8, 16 | Vertex input a pipeline can bake in |
 | `GFX_MAX_TIMERS` | 64 | GPU timers per frame |
+| `GFX_BAKE_PIPELINE_STATE` | off | Bakes every state that can be baked, to test that path on any device |
+| `GFX_EXIT_ON_ERROR` | off | Exits with a failure status on errors instead of breaking into the debugger |
+
+The last two are also CMake options of the examples.
 
 All functions are documented at their declarations in [`gfx.h`](gfx.h).
 

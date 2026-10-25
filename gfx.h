@@ -28,12 +28,15 @@ extern "C" {
 // Platform
 #define GFX_PLATFORM_WINDOWS 1
 #define GFX_PLATFORM_LINUX 2
+#define GFX_PLATFORM_MACOS 3
 
 #ifndef GFX_PLATFORM
 #if defined(_WIN64)
 #define GFX_PLATFORM GFX_PLATFORM_WINDOWS
 #elif defined(__linux__)
 #define GFX_PLATFORM GFX_PLATFORM_LINUX
+#elif defined(__APPLE__)
+#define GFX_PLATFORM GFX_PLATFORM_MACOS
 #else
 #error "Unsupported target platform"
 #endif
@@ -41,6 +44,7 @@ extern "C" {
 
 #define GFX_WINDOWS (GFX_PLATFORM == GFX_PLATFORM_WINDOWS)
 #define GFX_LINUX (GFX_PLATFORM == GFX_PLATFORM_LINUX)
+#define GFX_MACOS (GFX_PLATFORM == GFX_PLATFORM_MACOS)
 
 #include <vulkan/vulkan.h>
 
@@ -70,6 +74,11 @@ extern "C" {
 #define GFX_DEPTH_COMPARE_OP VK_COMPARE_OP_LESS
 #endif
 
+// Graphics pipelines have as much of their state dynamic as the device allows,
+// and the rest baked into them. Define GFX_BAKE_PIPELINE_STATE to bake every
+// state that can be baked, as on devices without the dynamic state extensions,
+// so that this can be tested on any device.
+
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
@@ -79,7 +88,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 
-#if GFX_LINUX
+#if GFX_LINUX || GFX_MACOS
 #include <signal.h>
 #endif
 
@@ -174,17 +183,21 @@ static const struct GfxVulkanResult {
         fprintf(stderr, "\x1B[1;93mWARNING: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);              \
     } while (0)
 
-#ifdef NDEBUG
+#if defined(GFX_EXIT_ON_ERROR)
+// Exit with a failure status, for automated runs where nothing should wait for
+// a debugger
+#define GFX_BREAK() exit(EXIT_FAILURE)
+#elif defined(NDEBUG)
 // Break into the debugger, or abort if there is none to break into
 #define GFX_BREAK() abort()
 #elif GFX_WINDOWS
 #define GFX_BREAK() __debugbreak()
-#elif GFX_LINUX
+#elif GFX_LINUX || GFX_MACOS
 #define GFX_BREAK() raise(SIGTRAP)
 #endif
 
-// Log an error message. Will cause a breakpoint (SIGTRAP on Linux) if NDEBUG is
-// not defined, and abort otherwise.
+// Log an error message. Will cause a breakpoint (SIGTRAP on Linux and macOS)
+// if NDEBUG is not defined, and abort otherwise.
 #define GFX_ERROR(fmt, ...)                                                                                            \
     do {                                                                                                               \
         fprintf(stderr, "\x1B[1;91mERROR: \x1B[0m%s:%d: " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__);                \
@@ -239,20 +252,23 @@ typedef struct GfxDeviceInfo {
 // Device level function pointers for extensions that the Vulkan loader does not
 // export directly. Resolved once by gfxCreateDevice() instead of on every call.
 // Call them through gfxDevice.fn, for instance:
-//     gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_LINE);
+//     gfxDevice.fn.vkCmdSetLogicOpEXT(cmd, VK_LOGIC_OP_XOR);
+// Dynamic state entry points are NULL when the state is not dynamic on the
+// device. The states that GFX can bake into pipelines instead are set with
+// gfxCmdSet* functions, which work either way.
 typedef struct GfxDeviceFunctions {
-    PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
-    PFN_vkCmdSetLogicOpEXT vkCmdSetLogicOpEXT;                   // NULL unless gfxDevice.dynamicLogicOp
-    PFN_vkCmdSetDepthClampEnableEXT vkCmdSetDepthClampEnableEXT; // NULL unless gfxDevice.dynamicDepthClamp
-    PFN_vkCmdSetAlphaToOneEnableEXT vkCmdSetAlphaToOneEnableEXT; // NULL unless gfxDevice.dynamicAlphaToOne
-    PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT;
-    PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT;
-    PFN_vkCmdSetAlphaToCoverageEnableEXT vkCmdSetAlphaToCoverageEnableEXT;
-    PFN_vkCmdSetPolygonModeEXT vkCmdSetPolygonModeEXT;
-    PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;
-    PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;
-    PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;
-    PFN_vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT;
+    PFN_vkCmdSetLogicOpEXT vkCmdSetLogicOpEXT;                             // NULL unless gfxDevice.dynamicLogicOp
+    PFN_vkCmdSetDepthClampEnableEXT vkCmdSetDepthClampEnableEXT;           // NULL unless gfxDevice.dynamicDepthClamp
+    PFN_vkCmdSetAlphaToOneEnableEXT vkCmdSetAlphaToOneEnableEXT;           // NULL unless gfxDevice.dynamicAlphaToOne
+    PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;                     // Use gfxCmdSetVertexInput()
+    PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT;   // Follows the attachments
+    PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT;                       // Use gfxCmdSetSampleMask()
+    PFN_vkCmdSetAlphaToCoverageEnableEXT vkCmdSetAlphaToCoverageEnableEXT; // Use gfxCmdSetAlphaToCoverageEnable()
+    PFN_vkCmdSetPolygonModeEXT vkCmdSetPolygonModeEXT;                     // Use gfxCmdSetPolygonMode()
+    PFN_vkCmdSetLogicOpEnableEXT vkCmdSetLogicOpEnableEXT;                 // Use gfxCmdSetLogicOpEnable()
+    PFN_vkCmdSetColorBlendEnableEXT vkCmdSetColorBlendEnableEXT;           // Use gfxCmdSetColorBlendEnable()
+    PFN_vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT;       // Use gfxCmdSetColorBlendEquation()
+    PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT;               // Use gfxCmdSetColorWriteMask()
     PFN_vkCreateAccelerationStructureKHR vkCreateAccelerationStructureKHR;
     PFN_vkDestroyAccelerationStructureKHR vkDestroyAccelerationStructureKHR;
     PFN_vkGetAccelerationStructureBuildSizesKHR vkGetAccelerationStructureBuildSizesKHR;
@@ -293,12 +309,25 @@ typedef struct GfxDevice {
     uint32_t queueFamilyIndex;
     VkPipelineCache pipelineCache;
     bool primitiveTopologyUnrestricted; // Topology can change to another class without another pipeline
-    bool dynamicLogicOp;                // The logic op is dynamic state, otherwise it is VK_LOGIC_OP_COPY
-    bool dynamicDepthClamp;             // Depth clamp enable is dynamic state, otherwise it is off
-    bool dynamicAlphaToOne;             // Alpha to one enable is dynamic state, otherwise it is off
-    bool accelerationStructures;        // VK_KHR_acceleration_structure is enabled
-    bool rayTracingPipelines;           // VK_KHR_ray_tracing_pipeline is enabled
-    uint64_t timestampMask;             // Valid bits of a timestamp, 0 if the queue has no timestamps
+
+    // States that are dynamic on the device. The others are baked into the
+    // pipelines, from what was last set with the gfxCmdSet* functions.
+    bool dynamicVertexInput;
+    bool dynamicRasterizationSamples;
+    bool dynamicSampleMask;
+    bool dynamicAlphaToCoverage;
+    bool dynamicPolygonMode;
+    bool dynamicLogicOpEnable;
+    bool dynamicColorBlend; // Blend enable, blend equation and color write mask
+
+    // Optional states that are only set when they are dynamic
+    bool dynamicLogicOp;    // Otherwise the logic op is VK_LOGIC_OP_COPY
+    bool dynamicDepthClamp; // Otherwise depth clamp is off
+    bool dynamicAlphaToOne; // Otherwise alpha to one is off
+
+    bool accelerationStructures; // VK_KHR_acceleration_structure is enabled
+    bool rayTracingPipelines;    // VK_KHR_ray_tracing_pipeline is enabled
+    uint64_t timestampMask;      // Valid bits of a timestamp, 0 if the queue has no timestamps
     uint64_t frame;
     uint64_t completedFrames;
     uint64_t resourceGeneration;
@@ -518,16 +547,37 @@ typedef struct GfxShaderStage {
 #define GFX_MAX_COLOR_ATTACHMENTS 8
 #endif
 
+// Most vertex bindings and attributes that a pipeline can bake in, on devices
+// where vertex input is not dynamic
+#ifndef GFX_MAX_VERTEX_BINDINGS
+#define GFX_MAX_VERTEX_BINDINGS 8
+#endif
+#ifndef GFX_MAX_VERTEX_ATTRIBUTES
+#define GFX_MAX_VERTEX_ATTRIBUTES 16
+#endif
+
 // What a graphics pipeline has to be built for, beyond the shader itself: the
-// formats of the attachments it renders to and, unless the device has
-// dynamicPrimitiveTopologyUnrestricted, the class of primitive topology it
-// draws with. Unused members are zero, so that keys can be compared as bytes.
+// formats of the attachments it renders to, unless the device has
+// dynamicPrimitiveTopologyUnrestricted the class of primitive topology it
+// draws with, and the states that are not dynamic on the device. Members for
+// states that are dynamic stay zero, so that keys can be compared as bytes.
 typedef struct GfxPipelineKey {
     uint32_t colorAttachmentCount;
     VkFormat colorAttachmentFormats[GFX_MAX_COLOR_ATTACHMENTS];
     VkFormat depthAttachmentFormat;
     VkFormat stencilAttachmentFormat;
     VkPrimitiveTopology topology; // First topology of its class, as the pipeline is created with
+
+    uint32_t vertexBindingCount;
+    VkVertexInputBindingDescription vertexBindings[GFX_MAX_VERTEX_BINDINGS];
+    uint32_t vertexAttributeCount;
+    VkVertexInputAttributeDescription vertexAttributes[GFX_MAX_VERTEX_ATTRIBUTES];
+    VkSampleCountFlagBits rasterizationSamples;
+    VkSampleMask sampleMask;
+    VkBool32 alphaToCoverageEnable;
+    VkPolygonMode polygonMode;
+    VkBool32 logicOpEnable;
+    VkPipelineColorBlendAttachmentState colorBlend[GFX_MAX_COLOR_ATTACHMENTS];
 } GfxPipelineKey;
 
 // A pipeline of a shader, together with what it was built for.
@@ -1280,11 +1330,12 @@ void gfxSetShaderAccelerationStructure(GfxShader* pShader, const char* pName,
 /// <summary>
 /// Bind the pipeline of a shader. A graphics shader must be bound while
 /// rendering, in a graphics pass of a render graph or between
-/// gfxCmdBeginRendering() and gfxCmdEndRendering(), and after the primitive
-/// topology has been set with gfxCmdSetDefaultStates() or
-/// gfxCmdSetPrimitiveTopology(). Its pipeline for the attachments and topology
-/// class is built the first time they are bound together. Ray tracing shaders
-/// cannot be bound like this, they are used through a ray tracing pipeline.
+/// gfxCmdBeginRendering() and gfxCmdEndRendering(). Its pipeline for the
+/// attachments, topology class and the states that are not dynamic on the
+/// device is built the first time they come together. Changing one of those
+/// with a gfxCmdSet* function afterwards binds the matching pipeline, so states
+/// can be set before or after binding. Ray tracing shaders cannot be bound like
+/// this, they are used through a ray tracing pipeline.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pShader">Shader to bind</param>
@@ -1410,8 +1461,9 @@ void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline
 /// The topology is a triangle list. Depth testing is enabled with
 /// GFX_DEPTH_COMPARE_OP, which follows the depth convention chosen with
 /// GFX_REVERSE_Z. Blending is disabled, but the blend equation is set to the
-/// usual alpha blending, so enabling blending with
-/// gfxDevice.fn.vkCmdSetColorBlendEnableEXT() is enough to get it.
+/// usual alpha blending, so enabling blending with gfxCmdSetColorBlendEnable()
+/// is enough to get it. Change the defaults with vkCmdSet* for states that are
+/// always dynamic, and with the gfxCmdSet* functions for the others.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pAttachmentSet">Attachment set being rendered to</param>
@@ -1425,15 +1477,64 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
                             uint32_t vertexAttributeDescriptionCount,
                             const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
 
+// States that may be baked into pipelines. Each function sets the state
+// dynamically when the device allows it, and otherwise records it for the
+// pipelines of shaders bound from then on, binding the matching pipeline if a
+// graphics shader is already bound. They take the same arguments as the
+// Vulkan commands of the same name, and only apply while rendering.
+
 /// <summary>
-/// Set the primitive topology. Use this rather than vkCmdSetPrimitiveTopology()
-/// so that shaders bound afterwards get a pipeline for the topology's class.
-/// Switching to a topology of another class, such as from triangles to
-/// points, needs the shader to be bound again after this.
+/// Set the primitive topology. Use this rather than vkCmdSetPrimitiveTopology(),
+/// as switching to a topology of another class, such as from triangles to
+/// points, needs another pipeline on most devices.
 /// </summary>
-/// <param name="cmd">Command buffer to use</param>
-/// <param name="topology">Topology to draw with</param>
 void gfxCmdSetPrimitiveTopology(VkCommandBuffer cmd, VkPrimitiveTopology topology);
+
+/// <summary>
+/// Set the vertex bindings and attributes. The binding divisors must be 1.
+/// </summary>
+void gfxCmdSetVertexInput(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+                          const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+                          uint32_t vertexAttributeDescriptionCount,
+                          const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
+
+/// <summary>
+/// Set the sample mask. The sample count follows the attachments.
+/// </summary>
+void gfxCmdSetSampleMask(VkCommandBuffer cmd, VkSampleCountFlagBits samples, const VkSampleMask* pSampleMask);
+
+/// <summary>
+/// Set whether alpha to coverage is enabled.
+/// </summary>
+void gfxCmdSetAlphaToCoverageEnable(VkCommandBuffer cmd, VkBool32 alphaToCoverageEnable);
+
+/// <summary>
+/// Set the polygon mode.
+/// </summary>
+void gfxCmdSetPolygonMode(VkCommandBuffer cmd, VkPolygonMode polygonMode);
+
+/// <summary>
+/// Set whether logic operations are enabled.
+/// </summary>
+void gfxCmdSetLogicOpEnable(VkCommandBuffer cmd, VkBool32 logicOpEnable);
+
+/// <summary>
+/// Set whether blending is enabled for a range of color attachments.
+/// </summary>
+void gfxCmdSetColorBlendEnable(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                               const VkBool32* pColorBlendEnables);
+
+/// <summary>
+/// Set the blend equations of a range of color attachments.
+/// </summary>
+void gfxCmdSetColorBlendEquation(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                                 const VkColorBlendEquationEXT* pColorBlendEquations);
+
+/// <summary>
+/// Set the color write masks of a range of color attachments.
+/// </summary>
+void gfxCmdSetColorWriteMask(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                             const VkColorComponentFlags* pColorWriteMasks);
 
 /// <summary>
 /// Set whether the swapchain should present with vertical synchronization. If a
@@ -2032,13 +2133,29 @@ static struct GfxMemory {
 } gfxMemory;
 
 // What graphics shaders bound now get their pipelines built for. Rendering
-// begun by GFX sets the attachment formats, and the topology class follows
-// gfxCmdSetPrimitiveTopology().
+// begun by GFX sets the attachment formats, the topology class follows
+// gfxCmdSetPrimitiveTopology(), and states that are not dynamic on the device
+// follow the other gfxCmdSet* functions.
 static struct GfxRendering {
     bool active; // Between beginning and ending rendering with GFX
     GfxPipelineKey key;
     VkPrimitiveTopology topology; // First topology of the class last set
+    GfxShader* pShader;           // Graphics shader bound while rendering, rebound when baked state changes
+    bool deferRebind;             // While gfxCmdSetDefaultStates() sets baked states one by one
 } gfxRendering;
+
+// The blend equation that gfxCmdSetDefaultStates() sets, the usual alpha blending
+static const VkColorBlendEquationEXT gfxDefaultBlendEquation = {
+    .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+    .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+    .colorBlendOp = VK_BLEND_OP_ADD,
+    .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
+    .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+    .alphaBlendOp = VK_BLEND_OP_ADD,
+};
+
+static const VkColorComponentFlags gfxAllColorComponents =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 
 typedef struct GfxMemoryAllocation {
     VkDeviceMemory memory;
@@ -2161,7 +2278,7 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 
     // VK_EXT_debug_utils names objects and regions of command buffers for
     // debuggers and profilers, so it is enabled whenever it is available
-    const char** ppExtensions = GFX_MALLOC((instanceExtensionCount + 1) * sizeof *ppExtensions);
+    const char** ppExtensions = GFX_MALLOC((instanceExtensionCount + 2) * sizeof *ppExtensions);
     if (instanceExtensionCount) {
         memcpy(ppExtensions, ppInstanceExtensions, instanceExtensionCount * sizeof *ppExtensions);
     }
@@ -2172,6 +2289,14 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
     }
     gfxInstance.debugUtils = extensionInList(extensionCount, ppExtensions, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
+    // Drivers that are not fully conformant, such as MoltenVK, are only listed
+    // when portability enumeration is enabled
+    if (!extensionInList(extensionCount, ppExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) &&
+        instanceExtensionAvailable(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME)) {
+        ppExtensions[extensionCount++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+    }
+    bool portability = extensionInList(extensionCount, ppExtensions, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pEngineName = "GFX",
@@ -2181,6 +2306,7 @@ void gfxCreateInstance(uint32_t apiVersion, uint32_t instanceExtensionCount, con
 
     VkInstanceCreateInfo ci = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
+        .flags = portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0,
         .pApplicationInfo = &ai,
         .enabledExtensionCount = extensionCount,
         .ppEnabledExtensionNames = ppExtensions,
@@ -2373,14 +2499,12 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamil
     return index;
 }
 
-// Dynamic state features of a physical device. The structures are unlinked,
-// so that they can be merged into a device create info.
+// Optional dynamic state features of a physical device. A structure is zeroed
+// when its extension is not available, and none is linked to another.
 typedef struct GfxDynamicStateFeatures {
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInput;
-    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended2; // Zeroed without VK_EXT_extended_dynamic_state2
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended2;
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT extended3;
-    bool extended2Available;
-    bool supported; // Whether every dynamic state that GFX pipelines always have is supported
 } GfxDynamicStateFeatures;
 
 static GfxDynamicStateFeatures getDynamicStateFeatures(VkPhysicalDevice physicalDevice)
@@ -2391,33 +2515,32 @@ static GfxDynamicStateFeatures getDynamicStateFeatures(VkPhysicalDevice physical
         .extended3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT},
     };
 
+#ifndef GFX_BAKE_PIPELINE_STATE
     // Feature structures may only be queried for extensions that are there
-    if (!deviceExtensionAvailable(physicalDevice, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) ||
-        !deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) {
-        return support;
-    }
-    support.extended2Available =
-        deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
-
-    support.vertexInput.pNext = &support.extended3;
-    support.extended3.pNext = support.extended2Available ? &support.extended2 : NULL;
-
     VkPhysicalDeviceFeatures2 features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &support.vertexInput,
     };
+    if (deviceExtensionAvailable(physicalDevice, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME)) {
+        support.vertexInput.pNext = features.pNext;
+        features.pNext = &support.vertexInput;
+    }
+    if (deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME)) {
+        support.extended2.pNext = features.pNext;
+        features.pNext = &support.extended2;
+    }
+    if (deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) {
+        support.extended3.pNext = features.pNext;
+        features.pNext = &support.extended3;
+    }
 
     vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
 
     support.vertexInput.pNext = NULL;
+    support.extended2.pNext = NULL;
     support.extended3.pNext = NULL;
-
-    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT* p = &support.extended3;
-    support.supported = support.vertexInput.vertexInputDynamicState && p->extendedDynamicState3RasterizationSamples &&
-                        p->extendedDynamicState3SampleMask && p->extendedDynamicState3AlphaToCoverageEnable &&
-                        p->extendedDynamicState3PolygonMode && p->extendedDynamicState3LogicOpEnable &&
-                        p->extendedDynamicState3ColorBlendEnable && p->extendedDynamicState3ColorBlendEquation &&
-                        p->extendedDynamicState3ColorWriteMask;
+#else
+    GFX_UNUSED(physicalDevice);
+#endif
 
     return support;
 }
@@ -2428,10 +2551,6 @@ static bool deviceSupported(VkPhysicalDevice physicalDevice, uint32_t apiVersion
 {
     if (apiVersion < VK_API_VERSION_1_3 ||
         (surface && !deviceExtensionAvailable(physicalDevice, VK_KHR_SWAPCHAIN_EXTENSION_NAME))) {
-        return false;
-    }
-
-    if (!getDynamicStateFeatures(physicalDevice).supported) {
         return false;
     }
 
@@ -2605,15 +2724,31 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
         return;
     }
 
-    // Graphics pipelines are built with nearly all of their state dynamic, so
-    // that only the shader and attachment formats are baked into them
+    // Graphics pipelines are built with as much of their state dynamic as the
+    // device allows, and the rest is baked into them. Depth clamp and alpha to
+    // one are only dynamic when their features are enabled, as they could not
+    // be turned on otherwise.
     GfxDynamicStateFeatures dynamicStateSupport = getDynamicStateFeatures(gfxDevice.physicalDevice);
-    if (!dynamicStateSupport.supported) {
-        GFX_ERROR("The chosen device lacks dynamic states that yggdrasil needs, from %s and %s",
-                  VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
-        return;
-    }
-    bool dynamicLogicOp = dynamicStateSupport.extended2.extendedDynamicState2LogicOp;
+    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT* pExtended3Support = &dynamicStateSupport.extended3;
+    gfxDevice.dynamicVertexInput = dynamicStateSupport.vertexInput.vertexInputDynamicState;
+    gfxDevice.dynamicRasterizationSamples = pExtended3Support->extendedDynamicState3RasterizationSamples;
+    gfxDevice.dynamicSampleMask = pExtended3Support->extendedDynamicState3SampleMask;
+    gfxDevice.dynamicAlphaToCoverage = pExtended3Support->extendedDynamicState3AlphaToCoverageEnable;
+    gfxDevice.dynamicPolygonMode = pExtended3Support->extendedDynamicState3PolygonMode;
+    gfxDevice.dynamicLogicOpEnable = pExtended3Support->extendedDynamicState3LogicOpEnable;
+    gfxDevice.dynamicColorBlend = pExtended3Support->extendedDynamicState3ColorBlendEnable &&
+                                  pExtended3Support->extendedDynamicState3ColorBlendEquation &&
+                                  pExtended3Support->extendedDynamicState3ColorWriteMask;
+    gfxDevice.dynamicLogicOp = dynamicStateSupport.extended2.extendedDynamicState2LogicOp;
+    gfxDevice.dynamicDepthClamp =
+        pExtended3Support->extendedDynamicState3DepthClampEnable && features && features->features.depthClamp;
+    gfxDevice.dynamicAlphaToOne =
+        pExtended3Support->extendedDynamicState3AlphaToOneEnable && features && features->features.alphaToOne;
+
+    bool extendedDynamicState3 = gfxDevice.dynamicRasterizationSamples || gfxDevice.dynamicSampleMask ||
+                                 gfxDevice.dynamicAlphaToCoverage || gfxDevice.dynamicPolygonMode ||
+                                 gfxDevice.dynamicLogicOpEnable || gfxDevice.dynamicColorBlend ||
+                                 gfxDevice.dynamicDepthClamp || gfxDevice.dynamicAlphaToOne;
 
     // Ray tracing is enabled whenever the device supports it
     bool rayTracingSupport =
@@ -2641,12 +2776,22 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     // The extensions that yggdrasil uses, followed by the requested ones that
     // are not already in the list
-    const char* ppRequiredExtensions[8];
+    const char* ppRequiredExtensions[9];
     uint32_t requiredExtensionCount = 0;
-    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
-    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
-    if (dynamicLogicOp) {
+    if (extendedDynamicState3) {
+        ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
+    }
+    if (gfxDevice.dynamicVertexInput) {
+        ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+    }
+    if (gfxDevice.dynamicLogicOp) {
         ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME;
+    }
+    // Drivers that are not fully conformant, such as MoltenVK, have to have
+    // their portability subset enabled. The extension is provisional, so its
+    // name is only defined in the beta headers.
+    if (deviceExtensionAvailable(gfxDevice.physicalDevice, "VK_KHR_portability_subset")) {
+        ppRequiredExtensions[requiredExtensionCount++] = "VK_KHR_portability_subset";
     }
     if (surface) {
         ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
@@ -2732,26 +2877,18 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
         .extendedDynamicState2LogicOp = VK_TRUE,
     };
 
-    // Depth clamp and alpha to one are only dynamic when their features are
-    // enabled, as they could not be turned on otherwise
-    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT* pExtended3Support = &dynamicStateSupport.extended3;
-    bool dynamicDepthClamp =
-        pExtended3Support->extendedDynamicState3DepthClampEnable && features && features->features.depthClamp;
-    bool dynamicAlphaToOne =
-        pExtended3Support->extendedDynamicState3AlphaToOneEnable && features && features->features.alphaToOne;
-
     VkPhysicalDeviceExtendedDynamicState3FeaturesEXT requiredExtendedDynamicState3Features = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
-        .extendedDynamicState3DepthClampEnable = dynamicDepthClamp,
-        .extendedDynamicState3PolygonMode = VK_TRUE,
-        .extendedDynamicState3RasterizationSamples = VK_TRUE,
-        .extendedDynamicState3SampleMask = VK_TRUE,
-        .extendedDynamicState3AlphaToCoverageEnable = VK_TRUE,
-        .extendedDynamicState3AlphaToOneEnable = dynamicAlphaToOne,
-        .extendedDynamicState3LogicOpEnable = VK_TRUE,
-        .extendedDynamicState3ColorBlendEnable = VK_TRUE,
-        .extendedDynamicState3ColorBlendEquation = VK_TRUE,
-        .extendedDynamicState3ColorWriteMask = VK_TRUE,
+        .extendedDynamicState3DepthClampEnable = gfxDevice.dynamicDepthClamp,
+        .extendedDynamicState3PolygonMode = gfxDevice.dynamicPolygonMode,
+        .extendedDynamicState3RasterizationSamples = gfxDevice.dynamicRasterizationSamples,
+        .extendedDynamicState3SampleMask = gfxDevice.dynamicSampleMask,
+        .extendedDynamicState3AlphaToCoverageEnable = gfxDevice.dynamicAlphaToCoverage,
+        .extendedDynamicState3AlphaToOneEnable = gfxDevice.dynamicAlphaToOne,
+        .extendedDynamicState3LogicOpEnable = gfxDevice.dynamicLogicOpEnable,
+        .extendedDynamicState3ColorBlendEnable = gfxDevice.dynamicColorBlend,
+        .extendedDynamicState3ColorBlendEquation = gfxDevice.dynamicColorBlend,
+        .extendedDynamicState3ColorWriteMask = gfxDevice.dynamicColorBlend,
     };
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR requiredAccelerationStructureFeatures = {
@@ -2767,9 +2904,13 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     mergeFeatures(&ci, &requiredFeatures, sizeof requiredFeatures);
     mergeFeatures(&ci, &requiredVk12Features, sizeof requiredVk12Features);
     mergeFeatures(&ci, &requiredVk13Features, sizeof requiredVk13Features);
-    mergeFeatures(&ci, &requiredVertexInputFeatures, sizeof requiredVertexInputFeatures);
-    mergeFeatures(&ci, &requiredExtendedDynamicState3Features, sizeof requiredExtendedDynamicState3Features);
-    if (dynamicLogicOp) {
+    if (gfxDevice.dynamicVertexInput) {
+        mergeFeatures(&ci, &requiredVertexInputFeatures, sizeof requiredVertexInputFeatures);
+    }
+    if (extendedDynamicState3) {
+        mergeFeatures(&ci, &requiredExtendedDynamicState3Features, sizeof requiredExtendedDynamicState3Features);
+    }
+    if (gfxDevice.dynamicLogicOp) {
         mergeFeatures(&ci, &requiredExtendedDynamicState2Features, sizeof requiredExtendedDynamicState2Features);
     }
     if (gfxDevice.accelerationStructures) {
@@ -2789,21 +2930,25 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     // not created with a feature that the device was not created with
     gfxDevice.samplerAnisotropy = pFeatures->features.samplerAnisotropy;
 
-    // Remember which of the optional states are dynamic, so that default states
-    // only set those that pipelines have
-    gfxDevice.dynamicLogicOp = dynamicLogicOp;
-    gfxDevice.dynamicDepthClamp = dynamicDepthClamp;
-    gfxDevice.dynamicAlphaToOne = dynamicAlphaToOne;
+    if (extendedDynamicState3) {
+        VkPhysicalDeviceExtendedDynamicState3PropertiesEXT extendedDynamicState3Properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT,
+        };
+        VkPhysicalDeviceProperties2 properties = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+            .pNext = &extendedDynamicState3Properties,
+        };
+        vkGetPhysicalDeviceProperties2(gfxDevice.physicalDevice, &properties);
+        gfxDevice.primitiveTopologyUnrestricted = extendedDynamicState3Properties.dynamicPrimitiveTopologyUnrestricted;
+    }
 
-    VkPhysicalDeviceExtendedDynamicState3PropertiesEXT extendedDynamicState3Properties = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT,
-    };
-    VkPhysicalDeviceProperties2 properties = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-        .pNext = &extendedDynamicState3Properties,
-    };
-    vkGetPhysicalDeviceProperties2(gfxDevice.physicalDevice, &properties);
-    gfxDevice.primitiveTopologyUnrestricted = extendedDynamicState3Properties.dynamicPrimitiveTopologyUnrestricted;
+    GFX_DEBUG("Dynamic states (1 if dynamic, 0 if baked into pipelines):");
+    GFX_DEBUG(" * vertex input %d, rasterization samples %d, sample mask %d, alpha to coverage %d",
+              gfxDevice.dynamicVertexInput, gfxDevice.dynamicRasterizationSamples, gfxDevice.dynamicSampleMask,
+              gfxDevice.dynamicAlphaToCoverage);
+    GFX_DEBUG(" * polygon mode %d, logic op enable %d, color blend %d, unrestricted topology %d",
+              gfxDevice.dynamicPolygonMode, gfxDevice.dynamicLogicOpEnable, gfxDevice.dynamicColorBlend,
+              gfxDevice.primitiveTopologyUnrestricted);
 
     VkPipelineCacheCreateInfo pipelineCacheCreateInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
@@ -2812,24 +2957,23 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     // Resolve extension entry points once, rather than on every call
 #define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetDeviceProcAddr(gfxDevice.device, #name)
-    GFX_LOAD_FN(vkCmdSetVertexInputEXT);
-    if (dynamicLogicOp) {
-        GFX_LOAD_FN(vkCmdSetLogicOpEXT);
+#define GFX_LOAD_FN_IF(condition, name)                                                                                \
+    if (condition) {                                                                                                   \
+        GFX_LOAD_FN(name);                                                                                             \
     }
-    if (dynamicDepthClamp) {
-        GFX_LOAD_FN(vkCmdSetDepthClampEnableEXT);
-    }
-    if (dynamicAlphaToOne) {
-        GFX_LOAD_FN(vkCmdSetAlphaToOneEnableEXT);
-    }
-    GFX_LOAD_FN(vkCmdSetRasterizationSamplesEXT);
-    GFX_LOAD_FN(vkCmdSetSampleMaskEXT);
-    GFX_LOAD_FN(vkCmdSetAlphaToCoverageEnableEXT);
-    GFX_LOAD_FN(vkCmdSetPolygonModeEXT);
-    GFX_LOAD_FN(vkCmdSetLogicOpEnableEXT);
-    GFX_LOAD_FN(vkCmdSetColorBlendEnableEXT);
-    GFX_LOAD_FN(vkCmdSetColorWriteMaskEXT);
-    GFX_LOAD_FN(vkCmdSetColorBlendEquationEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicLogicOp, vkCmdSetLogicOpEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicDepthClamp, vkCmdSetDepthClampEnableEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicAlphaToOne, vkCmdSetAlphaToOneEnableEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicVertexInput, vkCmdSetVertexInputEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicRasterizationSamples, vkCmdSetRasterizationSamplesEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicSampleMask, vkCmdSetSampleMaskEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicAlphaToCoverage, vkCmdSetAlphaToCoverageEnableEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicPolygonMode, vkCmdSetPolygonModeEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicLogicOpEnable, vkCmdSetLogicOpEnableEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicColorBlend, vkCmdSetColorBlendEnableEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicColorBlend, vkCmdSetColorBlendEquationEXT);
+    GFX_LOAD_FN_IF(gfxDevice.dynamicColorBlend, vkCmdSetColorWriteMaskEXT);
+#undef GFX_LOAD_FN_IF
     GFX_LOAD_FN(vkCreateAccelerationStructureKHR);
     GFX_LOAD_FN(vkDestroyAccelerationStructureKHR);
     GFX_LOAD_FN(vkGetAccelerationStructureBuildSizesKHR);
@@ -4811,13 +4955,41 @@ static void beginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment
     gfxRendering.key.depthAttachmentFormat =
         pAttachmentSet->pDepthAttachment ? pAttachmentSet->pDepthAttachment->format : VK_FORMAT_UNDEFINED;
     gfxRendering.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    gfxRendering.pShader = NULL;
     gfxRendering.active = true;
+
+    // States that are baked into pipelines start out as gfxCmdSetDefaultStates()
+    // sets them, with the sample count of the attachments
+    GfxPipelineKey* pKey = &gfxRendering.key;
+    if (!gfxDevice.dynamicRasterizationSamples) {
+        pKey->rasterizationSamples = pImage->samples ? pImage->samples : VK_SAMPLE_COUNT_1_BIT;
+    }
+    if (!gfxDevice.dynamicSampleMask) {
+        pKey->sampleMask = ~0u;
+    }
+    if (!gfxDevice.dynamicPolygonMode) {
+        pKey->polygonMode = VK_POLYGON_MODE_FILL;
+    }
+    if (!gfxDevice.dynamicColorBlend) {
+        for (uint32_t i = 0; i < pKey->colorAttachmentCount; i++) {
+            pKey->colorBlend[i] = (VkPipelineColorBlendAttachmentState){
+                .srcColorBlendFactor = gfxDefaultBlendEquation.srcColorBlendFactor,
+                .dstColorBlendFactor = gfxDefaultBlendEquation.dstColorBlendFactor,
+                .colorBlendOp = gfxDefaultBlendEquation.colorBlendOp,
+                .srcAlphaBlendFactor = gfxDefaultBlendEquation.srcAlphaBlendFactor,
+                .dstAlphaBlendFactor = gfxDefaultBlendEquation.dstAlphaBlendFactor,
+                .alphaBlendOp = gfxDefaultBlendEquation.alphaBlendOp,
+                .colorWriteMask = gfxAllColorComponents,
+            };
+        }
+    }
 }
 
 static void endRendering(VkCommandBuffer cmd)
 {
     vkCmdEndRendering(cmd);
     gfxRendering.active = false;
+    gfxRendering.pShader = NULL;
 }
 
 void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
@@ -6057,8 +6229,8 @@ static bool buildPipelines(GfxShader* pShader, bool fatal)
 }
 
 // Build a graphics pipeline for a shader with every state dynamic that the
-// device allows, so that only the stages, the attachment formats and possibly
-// the topology class are baked into it
+// device allows. The stages, the attachment formats, possibly the topology
+// class and the states that cannot be dynamic are baked into it from the key.
 static VkPipeline createGraphicsPipeline(const GfxShader* pShader, const GfxPipelineKey* pKey)
 {
     // A graphics shader has at most one of each of the seven graphics stages
@@ -6082,7 +6254,8 @@ static VkPipeline createGraphicsPipeline(const GfxShader* pShader, const GfxPipe
     bool mesh = pShader->stages & VK_SHADER_STAGE_MESH_BIT_EXT;
     bool tessellation = pShader->stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
 
-    static const VkDynamicState commonStates[] = {
+    // Dynamic in Vulkan 1.3
+    static const VkDynamicState coreStates[] = {
         VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
         VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
         VK_DYNAMIC_STATE_LINE_WIDTH,
@@ -6102,46 +6275,46 @@ static VkPipeline createGraphicsPipeline(const GfxShader* pShader, const GfxPipe
         VK_DYNAMIC_STATE_STENCIL_OP,
         VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE,
         VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
-        VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT,
-        VK_DYNAMIC_STATE_SAMPLE_MASK_EXT,
-        VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT,
-        VK_DYNAMIC_STATE_POLYGON_MODE_EXT,
-        VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT,
     };
 
-    VkDynamicState dynamicStates[GFX_ARRAY_LEN(commonStates) + 9];
+    VkDynamicState dynamicStates[GFX_ARRAY_LEN(coreStates) + 16];
     uint32_t dynamicStateCount = 0;
-    for (uint32_t i = 0; i < GFX_ARRAY_LEN(commonStates); i++) {
-        dynamicStates[dynamicStateCount++] = commonStates[i];
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(coreStates); i++) {
+        dynamicStates[dynamicStateCount++] = coreStates[i];
     }
+
+#define GFX_ADD_DYNAMIC_STATE_IF(condition, state)                                                                     \
+    if (condition) {                                                                                                   \
+        dynamicStates[dynamicStateCount++] = state;                                                                    \
+    }
+    GFX_ADD_DYNAMIC_STATE_IF(!mesh, VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY);
+    GFX_ADD_DYNAMIC_STATE_IF(!mesh, VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE);
+    GFX_ADD_DYNAMIC_STATE_IF(!mesh && gfxDevice.dynamicVertexInput, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicRasterizationSamples, VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicSampleMask, VK_DYNAMIC_STATE_SAMPLE_MASK_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicAlphaToCoverage, VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicPolygonMode, VK_DYNAMIC_STATE_POLYGON_MODE_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicLogicOpEnable, VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicLogicOp, VK_DYNAMIC_STATE_LOGIC_OP_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicDepthClamp, VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(gfxDevice.dynamicAlphaToOne, VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT);
 
     // Dynamic states that are set per color attachment have to be set for a
     // draw, so they are left out when there is nothing to set them for
-    if (pKey->colorAttachmentCount) {
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
-    }
-    if (!mesh) {
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
-    }
-    if (gfxDevice.dynamicLogicOp) {
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_LOGIC_OP_EXT;
-    }
-    if (gfxDevice.dynamicDepthClamp) {
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
-    }
-    if (gfxDevice.dynamicAlphaToOne) {
-        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT;
-    }
+    bool dynamicColorBlend = gfxDevice.dynamicColorBlend && pKey->colorAttachmentCount;
+    GFX_ADD_DYNAMIC_STATE_IF(dynamicColorBlend, VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(dynamicColorBlend, VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT);
+    GFX_ADD_DYNAMIC_STATE_IF(dynamicColorBlend, VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT);
+#undef GFX_ADD_DYNAMIC_STATE_IF
 
-    // The state structures are required, but what they hold is dynamic and
-    // ignored, apart from the topology class, the patch size and a logic op
-    // that cannot be made dynamic
+    // The state structures are required, but what is dynamic in them is
+    // ignored. Members of the key for states that are dynamic are zero.
     VkPipelineVertexInputStateCreateInfo vertexInputState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+        .vertexBindingDescriptionCount = pKey->vertexBindingCount,
+        .pVertexBindingDescriptions = pKey->vertexBindings,
+        .vertexAttributeDescriptionCount = pKey->vertexAttributeCount,
+        .pVertexAttributeDescriptions = pKey->vertexAttributes,
     };
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
@@ -6156,21 +6329,24 @@ static VkPipeline createGraphicsPipeline(const GfxShader* pShader, const GfxPipe
     };
     VkPipelineRasterizationStateCreateInfo rasterizationState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .polygonMode = pKey->polygonMode,
         .lineWidth = 1.0f,
     };
     VkPipelineMultisampleStateCreateInfo multisampleState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = pKey->rasterizationSamples ? pKey->rasterizationSamples : VK_SAMPLE_COUNT_1_BIT,
+        .pSampleMask = gfxDevice.dynamicSampleMask ? NULL : &pKey->sampleMask,
+        .alphaToCoverageEnable = pKey->alphaToCoverageEnable,
     };
     VkPipelineDepthStencilStateCreateInfo depthStencilState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
     };
-    VkPipelineColorBlendAttachmentState colorBlendAttachments[GFX_MAX_COLOR_ATTACHMENTS] = {0};
     VkPipelineColorBlendStateCreateInfo colorBlendState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOpEnable = pKey->logicOpEnable,
         .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = pKey->colorAttachmentCount,
-        .pAttachments = colorBlendAttachments,
+        .pAttachments = pKey->colorBlend,
     };
     VkPipelineDynamicStateCreateInfo dynamicState = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -6595,7 +6771,7 @@ void gfxCmdBindShader(VkCommandBuffer cmd, GfxShader* pShader)
     }
 
     // Tessellation pipelines always take patches, and mesh pipelines ignore
-    // the topology
+    // the topology and vertex input
     GfxPipelineKey key = gfxRendering.key;
     if (pShader->stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) {
         key.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
@@ -6603,6 +6779,12 @@ void gfxCmdBindShader(VkCommandBuffer cmd, GfxShader* pShader)
         key.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     } else {
         key.topology = gfxRendering.topology;
+    }
+    if (pShader->stages & VK_SHADER_STAGE_MESH_BIT_EXT) {
+        key.vertexBindingCount = 0;
+        key.vertexAttributeCount = 0;
+        memset(key.vertexBindings, 0, sizeof key.vertexBindings);
+        memset(key.vertexAttributes, 0, sizeof key.vertexAttributes);
     }
 
     // There are only ever a few pipelines per shader, so they are searched in
@@ -6625,6 +6807,7 @@ void gfxCmdBindShader(VkCommandBuffer cmd, GfxShader* pShader)
     }
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    gfxRendering.pShader = pShader;
 }
 
 static VkPipelineBindPoint shaderBindPoint(const GfxShader* pShader)
@@ -7522,6 +7705,10 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
         return;
     }
 
+    // A shader that is already bound gets its pipeline for the baked states
+    // once, when they have all been set
+    gfxRendering.deferRebind = true;
+
     // Viewport and sample count follow the attachments actually being rendered
     // to, which is not necessarily the swapchain
     const VkExtent2D extent = {.width = pImage->width, .height = pImage->height};
@@ -7538,19 +7725,21 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
     vkCmdSetScissorWithCount(cmd, 1, &scissor);
     vkCmdSetRasterizerDiscardEnable(cmd, VK_FALSE);
 
-    gfxDevice.fn.vkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
-                                        vertexAttributeDescriptionCount, vertexAttributeDescriptions);
+    gfxCmdSetVertexInput(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions, vertexAttributeDescriptionCount,
+                         vertexAttributeDescriptions);
     gfxCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
 
     const VkSampleMask sampleMask = ~0u;
-    gfxDevice.fn.vkCmdSetRasterizationSamplesEXT(cmd, samples);
-    gfxDevice.fn.vkCmdSetSampleMaskEXT(cmd, samples, &sampleMask);
-    gfxDevice.fn.vkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
+    if (gfxDevice.dynamicRasterizationSamples) {
+        gfxDevice.fn.vkCmdSetRasterizationSamplesEXT(cmd, samples);
+    }
+    gfxCmdSetSampleMask(cmd, samples, &sampleMask);
+    gfxCmdSetAlphaToCoverageEnable(cmd, VK_FALSE);
     if (gfxDevice.dynamicAlphaToOne) {
         gfxDevice.fn.vkCmdSetAlphaToOneEnableEXT(cmd, VK_FALSE);
     }
-    gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
+    gfxCmdSetPolygonMode(cmd, VK_POLYGON_MODE_FILL);
     vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
     vkCmdSetLineWidth(cmd, 1.0f);
@@ -7575,26 +7764,32 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
     vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
 
     const VkBool32 colorBlendEnable = VK_FALSE;
-    const VkColorBlendEquationEXT colorBlendEquation = {
-        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        .colorBlendOp = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
-        .alphaBlendOp = VK_BLEND_OP_ADD,
-    };
-    const VkColorComponentFlags colorComponents =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     const float blendConstants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    gfxDevice.fn.vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
+    gfxCmdSetLogicOpEnable(cmd, VK_FALSE);
     if (gfxDevice.dynamicLogicOp) {
         gfxDevice.fn.vkCmdSetLogicOpEXT(cmd, VK_LOGIC_OP_COPY);
     }
     vkCmdSetBlendConstants(cmd, blendConstants);
     for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
-        gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, i, 1, &colorBlendEnable);
-        gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, i, 1, &colorBlendEquation);
-        gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, i, 1, &colorComponents);
+        gfxCmdSetColorBlendEnable(cmd, i, 1, &colorBlendEnable);
+        gfxCmdSetColorBlendEquation(cmd, i, 1, &gfxDefaultBlendEquation);
+        gfxCmdSetColorWriteMask(cmd, i, 1, &gfxAllColorComponents);
+    }
+
+    gfxRendering.deferRebind = false;
+    if (gfxRendering.pShader) {
+        gfxCmdBindShader(cmd, gfxRendering.pShader);
+    }
+}
+
+// Bind the pipeline that matches baked state that changed, if a graphics shader
+// is bound. A pipeline is built for every combination that a shader is bound
+// with, so setting several baked states before binding avoids building ones
+// for the combinations in between.
+static void bakedStateChanged(VkCommandBuffer cmd)
+{
+    if (gfxRendering.pShader && !gfxRendering.deferRebind) {
+        gfxCmdBindShader(cmd, gfxRendering.pShader);
     }
 }
 
@@ -7620,7 +7815,169 @@ static VkPrimitiveTopology topologyClass(VkPrimitiveTopology topology)
 void gfxCmdSetPrimitiveTopology(VkCommandBuffer cmd, VkPrimitiveTopology topology)
 {
     vkCmdSetPrimitiveTopology(cmd, topology);
+
+    VkPrimitiveTopology previous = gfxRendering.topology;
     gfxRendering.topology = topologyClass(topology);
+    if (gfxRendering.topology != previous && !gfxDevice.primitiveTopologyUnrestricted) {
+        bakedStateChanged(cmd);
+    }
+}
+
+void gfxCmdSetVertexInput(VkCommandBuffer cmd, uint32_t vertexBindingDescriptionCount,
+                          const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
+                          uint32_t vertexAttributeDescriptionCount,
+                          const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions)
+{
+    if (gfxDevice.dynamicVertexInput) {
+        gfxDevice.fn.vkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
+                                            vertexAttributeDescriptionCount, vertexAttributeDescriptions);
+        return;
+    }
+
+    if (vertexBindingDescriptionCount > GFX_MAX_VERTEX_BINDINGS ||
+        vertexAttributeDescriptionCount > GFX_MAX_VERTEX_ATTRIBUTES) {
+        GFX_ERROR("%" PRIu32 " vertex bindings and %" PRIu32 " attributes, but at most %d and %d can be baked into "
+                  "a pipeline, see GFX_MAX_VERTEX_BINDINGS and GFX_MAX_VERTEX_ATTRIBUTES",
+                  vertexBindingDescriptionCount, vertexAttributeDescriptionCount, GFX_MAX_VERTEX_BINDINGS,
+                  GFX_MAX_VERTEX_ATTRIBUTES);
+        return;
+    }
+
+    GfxPipelineKey* pKey = &gfxRendering.key;
+    memset(pKey->vertexBindings, 0, sizeof pKey->vertexBindings);
+    memset(pKey->vertexAttributes, 0, sizeof pKey->vertexAttributes);
+    pKey->vertexBindingCount = vertexBindingDescriptionCount;
+    pKey->vertexAttributeCount = vertexAttributeDescriptionCount;
+    for (uint32_t i = 0; i < vertexBindingDescriptionCount; i++) {
+        pKey->vertexBindings[i] = (VkVertexInputBindingDescription){
+            .binding = vertexBindingDescriptions[i].binding,
+            .stride = vertexBindingDescriptions[i].stride,
+            .inputRate = vertexBindingDescriptions[i].inputRate,
+        };
+    }
+    for (uint32_t i = 0; i < vertexAttributeDescriptionCount; i++) {
+        pKey->vertexAttributes[i] = (VkVertexInputAttributeDescription){
+            .location = vertexAttributeDescriptions[i].location,
+            .binding = vertexAttributeDescriptions[i].binding,
+            .format = vertexAttributeDescriptions[i].format,
+            .offset = vertexAttributeDescriptions[i].offset,
+        };
+    }
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetSampleMask(VkCommandBuffer cmd, VkSampleCountFlagBits samples, const VkSampleMask* pSampleMask)
+{
+    if (gfxDevice.dynamicSampleMask) {
+        gfxDevice.fn.vkCmdSetSampleMaskEXT(cmd, samples, pSampleMask);
+        return;
+    }
+
+    // A single mask word covers up to 32 samples
+    gfxRendering.key.sampleMask = pSampleMask[0];
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetAlphaToCoverageEnable(VkCommandBuffer cmd, VkBool32 alphaToCoverageEnable)
+{
+    if (gfxDevice.dynamicAlphaToCoverage) {
+        gfxDevice.fn.vkCmdSetAlphaToCoverageEnableEXT(cmd, alphaToCoverageEnable);
+        return;
+    }
+
+    gfxRendering.key.alphaToCoverageEnable = alphaToCoverageEnable;
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetPolygonMode(VkCommandBuffer cmd, VkPolygonMode polygonMode)
+{
+    if (gfxDevice.dynamicPolygonMode) {
+        gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, polygonMode);
+        return;
+    }
+
+    gfxRendering.key.polygonMode = polygonMode;
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetLogicOpEnable(VkCommandBuffer cmd, VkBool32 logicOpEnable)
+{
+    if (gfxDevice.dynamicLogicOpEnable) {
+        gfxDevice.fn.vkCmdSetLogicOpEnableEXT(cmd, logicOpEnable);
+        return;
+    }
+
+    gfxRendering.key.logicOpEnable = logicOpEnable;
+    bakedStateChanged(cmd);
+}
+
+// Whether a range of color attachments is within those being rendered to
+static bool colorAttachmentRangeValid(uint32_t firstAttachment, uint32_t attachmentCount)
+{
+    if (firstAttachment + attachmentCount > gfxRendering.key.colorAttachmentCount) {
+        GFX_ERROR("Color attachments %" PRIu32 " to %" PRIu32 " set, but only %" PRIu32 " are rendered to",
+                  firstAttachment, firstAttachment + attachmentCount - 1, gfxRendering.key.colorAttachmentCount);
+        return false;
+    }
+    return true;
+}
+
+void gfxCmdSetColorBlendEnable(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                               const VkBool32* pColorBlendEnables)
+{
+    if (gfxDevice.dynamicColorBlend) {
+        gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, firstAttachment, attachmentCount, pColorBlendEnables);
+        return;
+    }
+
+    if (!colorAttachmentRangeValid(firstAttachment, attachmentCount)) {
+        return;
+    }
+    for (uint32_t i = 0; i < attachmentCount; i++) {
+        gfxRendering.key.colorBlend[firstAttachment + i].blendEnable = pColorBlendEnables[i];
+    }
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetColorBlendEquation(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                                 const VkColorBlendEquationEXT* pColorBlendEquations)
+{
+    if (gfxDevice.dynamicColorBlend) {
+        gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, firstAttachment, attachmentCount, pColorBlendEquations);
+        return;
+    }
+
+    if (!colorAttachmentRangeValid(firstAttachment, attachmentCount)) {
+        return;
+    }
+    for (uint32_t i = 0; i < attachmentCount; i++) {
+        VkPipelineColorBlendAttachmentState* pState = &gfxRendering.key.colorBlend[firstAttachment + i];
+        const VkColorBlendEquationEXT* pEquation = &pColorBlendEquations[i];
+        pState->srcColorBlendFactor = pEquation->srcColorBlendFactor;
+        pState->dstColorBlendFactor = pEquation->dstColorBlendFactor;
+        pState->colorBlendOp = pEquation->colorBlendOp;
+        pState->srcAlphaBlendFactor = pEquation->srcAlphaBlendFactor;
+        pState->dstAlphaBlendFactor = pEquation->dstAlphaBlendFactor;
+        pState->alphaBlendOp = pEquation->alphaBlendOp;
+    }
+    bakedStateChanged(cmd);
+}
+
+void gfxCmdSetColorWriteMask(VkCommandBuffer cmd, uint32_t firstAttachment, uint32_t attachmentCount,
+                             const VkColorComponentFlags* pColorWriteMasks)
+{
+    if (gfxDevice.dynamicColorBlend) {
+        gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, firstAttachment, attachmentCount, pColorWriteMasks);
+        return;
+    }
+
+    if (!colorAttachmentRangeValid(firstAttachment, attachmentCount)) {
+        return;
+    }
+    for (uint32_t i = 0; i < attachmentCount; i++) {
+        gfxRendering.key.colorBlend[firstAttachment + i].colorWriteMask = pColorWriteMasks[i];
+    }
+    bakedStateChanged(cmd);
 }
 
 

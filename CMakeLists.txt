@@ -15,16 +15,37 @@ endif()
 
 project("Yggdrasil" VERSION 0.0.1)
 
+option(GFX_BAKE_PIPELINE_STATE "Bake every pipeline state that can be baked, to test that path on any device" OFF)
+option(GFX_EXIT_ON_ERROR "Exit on errors instead of breaking into the debugger, for automated runs" OFF)
+if (GFX_BAKE_PIPELINE_STATE)
+    add_compile_definitions(GFX_BAKE_PIPELINE_STATE)
+endif()
+if (GFX_EXIT_ON_ERROR)
+    add_compile_definitions(GFX_EXIT_ON_ERROR)
+endif()
+
 find_package(Vulkan REQUIRED)
 include_directories(${Vulkan_INCLUDE_DIRS})
 link_libraries(${Vulkan_LIBRARIES})
 
 set(VULKAN_SDK_ROOT $ENV{VULKAN_SDK})
-find_library(GLSLANG_LIB glslang HINTS "${VULKAN_SDK_ROOT}/lib")
-find_library(SPIRV_LIB SPIRV-Tools HINTS "${VULKAN_SDK_ROOT}/lib")
-find_library(SPIRV_OPT_LIB SPIRV-Tools-opt HINTS "${VULKAN_SDK_ROOT}/lib")
-find_library(GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB glslang-default-resource-limits HINTS "${VULKAN_SDK_ROOT}/lib")
-link_libraries(${GLSLANG_LIB} ${SPIRV_LIB} ${SPIRV_OPT_LIB} ${GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB})
+find_library(GLSLANG_LIB glslang REQUIRED HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB glslang-default-resource-limits REQUIRED HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(SPIRV_OPT_LIB SPIRV-Tools-opt REQUIRED HINTS "${VULKAN_SDK_ROOT}/lib")
+find_library(SPIRV_LIB SPIRV-Tools REQUIRED HINTS "${VULKAN_SDK_ROOT}/lib")
+
+# Static libraries are searched once, in order, so each one comes before the
+# ones it depends on
+link_libraries(${GLSLANG_LIB} ${GLSLANG_DEFAULT_RESOURCE_LIMITS_LIB} ${SPIRV_OPT_LIB} ${SPIRV_LIB})
+
+# glslang and SPIRV-Tools are C++ libraries, so a C program linking them needs
+# the C++ runtime, which MSVC links on its own
+if (APPLE)
+    link_libraries(c++)
+elseif (UNIX)
+    find_package(Threads REQUIRED)
+    link_libraries(stdc++ m Threads::Threads)
+endif()
 
 add_subdirectory(submodules)
 include_directories(submodules/glfw/include)

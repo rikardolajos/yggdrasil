@@ -57,6 +57,7 @@ static void framebufferSizeCallback(uint32_t* pWidth, uint32_t* pHeight)
 
 static void createWindow()
 {
+    glfwInitVulkanLoader(vkGetInstanceProcAddr);
     if (!glfwInit()) {
         GFX_ERROR("Failed to initialize GLFW");
     }
@@ -147,8 +148,8 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAtt
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .alphaBlendOp = VK_BLEND_OP_ADD,
     };
-    gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, 0, 1, &blendEnable);
-    gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, 0, 1, &additive);
+    gfxCmdSetColorBlendEnable(cmd, 0, 1, &blendEnable);
+    gfxCmdSetColorBlendEquation(cmd, 0, 1, &additive);
 }
 
 // What the simulation pass needs to record its commands
