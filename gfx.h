@@ -225,9 +225,9 @@ typedef struct GfxDeviceProperties {
 } GfxDeviceProperties;
 
 // Description of a physical device, as listed by gfxEnumerateDevices(). A
-// device is supported if it has Vulkan 1.3, shader objects and a queue that
-// gfxCreateDevice() can use, which must also be able to present to the
-// surface if one was given.
+// device is supported if it has Vulkan 1.3, the dynamic states that GFX
+// pipelines are built with and a queue that gfxCreateDevice() can use, which
+// must also be able to present to the surface if one was given.
 typedef struct GfxDeviceInfo {
     char name[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE];
     uint8_t uuid[VK_UUID_SIZE]; // Same across runs and driver versions
@@ -241,10 +241,10 @@ typedef struct GfxDeviceInfo {
 // Call them through gfxDevice.fn, for instance:
 //     gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_LINE);
 typedef struct GfxDeviceFunctions {
-    PFN_vkCreateShadersEXT vkCreateShadersEXT;
-    PFN_vkDestroyShaderEXT vkDestroyShaderEXT;
-    PFN_vkCmdBindShadersEXT vkCmdBindShadersEXT;
     PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT;
+    PFN_vkCmdSetLogicOpEXT vkCmdSetLogicOpEXT;                   // NULL unless gfxDevice.dynamicLogicOp
+    PFN_vkCmdSetDepthClampEnableEXT vkCmdSetDepthClampEnableEXT; // NULL unless gfxDevice.dynamicDepthClamp
+    PFN_vkCmdSetAlphaToOneEnableEXT vkCmdSetAlphaToOneEnableEXT; // NULL unless gfxDevice.dynamicAlphaToOne
     PFN_vkCmdSetRasterizationSamplesEXT vkCmdSetRasterizationSamplesEXT;
     PFN_vkCmdSetSampleMaskEXT vkCmdSetSampleMaskEXT;
     PFN_vkCmdSetAlphaToCoverageEnableEXT vkCmdSetAlphaToCoverageEnableEXT;
@@ -291,10 +291,14 @@ typedef struct GfxDevice {
     VkCommandPool commandPool;
     VkQueue queue;
     uint32_t queueFamilyIndex;
-    VkShaderStageFlags graphicsShaderStages;
-    bool accelerationStructures; // VK_KHR_acceleration_structure is enabled
-    bool rayTracingPipelines;    // VK_KHR_ray_tracing_pipeline is enabled
-    uint64_t timestampMask;      // Valid bits of a timestamp, 0 if the queue has no timestamps
+    VkPipelineCache pipelineCache;
+    bool primitiveTopologyUnrestricted; // Topology can change to another class without another pipeline
+    bool dynamicLogicOp;                // The logic op is dynamic state, otherwise it is VK_LOGIC_OP_COPY
+    bool dynamicDepthClamp;             // Depth clamp enable is dynamic state, otherwise it is off
+    bool dynamicAlphaToOne;             // Alpha to one enable is dynamic state, otherwise it is off
+    bool accelerationStructures;        // VK_KHR_acceleration_structure is enabled
+    bool rayTracingPipelines;           // VK_KHR_ray_tracing_pipeline is enabled
+    uint64_t timestampMask;             // Valid bits of a timestamp, 0 if the queue has no timestamps
     uint64_t frame;
     uint64_t completedFrames;
     uint64_t resourceGeneration;
@@ -495,17 +499,42 @@ typedef struct GfxShaderStageDesc {
     size_t codeSize;
     VkShaderStageFlagBits stage;
     const VkSpecializationInfo* pSpecializationInfo;
+    uint32_t patchControlPoints; // Tessellation control stage only: vertices per input patch, 3 if 0
 } GfxShaderStageDesc;
 
 // One stage of a shader.
 typedef struct GfxShaderStage {
     VkShaderStageFlagBits stage;
-    VkShaderEXT shader;
+    VkShaderModule module; // VK_NULL_HANDLE for ray tracing stages
     char* pPath;
     uint32_t* pCode;
     size_t codeSize;
     VkSpecializationInfo* pSpecializationInfo;
+    uint32_t patchControlPoints;
 } GfxShaderStage;
+
+// Most color attachments a graphics pipeline can render to
+#ifndef GFX_MAX_COLOR_ATTACHMENTS
+#define GFX_MAX_COLOR_ATTACHMENTS 8
+#endif
+
+// What a graphics pipeline has to be built for, beyond the shader itself: the
+// formats of the attachments it renders to and, unless the device has
+// dynamicPrimitiveTopologyUnrestricted, the class of primitive topology it
+// draws with. Unused members are zero, so that keys can be compared as bytes.
+typedef struct GfxPipelineKey {
+    uint32_t colorAttachmentCount;
+    VkFormat colorAttachmentFormats[GFX_MAX_COLOR_ATTACHMENTS];
+    VkFormat depthAttachmentFormat;
+    VkFormat stencilAttachmentFormat;
+    VkPrimitiveTopology topology; // First topology of its class, as the pipeline is created with
+} GfxPipelineKey;
+
+// A pipeline of a shader, together with what it was built for.
+typedef struct GfxShaderPipeline {
+    GfxPipelineKey key;
+    VkPipeline pipeline;
+} GfxShaderPipeline;
 
 // A descriptor binding as reflected from the shader, merged over all stages,
 // together with the resource attached to it. Resources are attached by pointer
@@ -556,11 +585,16 @@ typedef struct GfxShaderSet {
     GfxRetiredDescriptorSet* pRetired;
 } GfxShaderSet;
 
-// Shader abstracts the handling of shaders, descriptors and layouts and builds
-// on top of Vulkan's shader objects. Create a new shader from one or more
-// stages with gfxCreateShader(). Graphics stages are linked together. The
+// Shader abstracts the handling of shaders, pipelines, descriptors and layouts.
+// Create a new shader from one or more stages with gfxCreateShader(). The
 // descriptor set layouts, pipeline layout and push constant range are all
 // reflected from the SPIR-V.
+//
+// A compute shader builds its pipeline when it is created. A graphics shader
+// builds a pipeline the first time it is bound for a combination of attachment
+// formats and, unless the device has dynamicPrimitiveTopologyUnrestricted, the
+// class of primitive topology, and binds that pipeline from then on. All other
+// state is dynamic and is set with gfxCmdSetDefaultStates() and vkCmdSet*.
 //
 // Resources are attached by the name they have in the shader, either the
 // variable name or, for blocks declared without an instance name, the block
@@ -584,6 +618,10 @@ typedef struct GfxShader {
     VkPipelineLayout pipelineLayout;
     VkPushConstantRange pushConstantRange; // Size is 0 if there are no push constants
     uint32_t localSize[3];                 // Workgroup size of a compute shader
+
+    uint32_t pipelineCount;
+    uint32_t pipelineCapacity;
+    GfxShaderPipeline* pPipelines; // The one pipeline of a compute shader has a zeroed key
 
     uint32_t bindingCount;
     GfxShaderBinding* pBindings; // Sorted by set and binding
@@ -1240,13 +1278,17 @@ void gfxSetShaderAccelerationStructure(GfxShader* pShader, const char* pName,
                                        const GfxAccelerationStructure* pAccelerationStructure);
 
 /// <summary>
-/// Bind a shader. For graphics shaders, the graphics stages that the shader
-/// does not have are bound to null. Ray tracing shaders cannot be bound like
-/// this, they are used through a ray tracing pipeline.
+/// Bind the pipeline of a shader. A graphics shader must be bound while
+/// rendering, in a graphics pass of a render graph or between
+/// gfxCmdBeginRendering() and gfxCmdEndRendering(), and after the primitive
+/// topology has been set with gfxCmdSetDefaultStates() or
+/// gfxCmdSetPrimitiveTopology(). Its pipeline for the attachments and topology
+/// class is built the first time they are bound together. Ray tracing shaders
+/// cannot be bound like this, they are used through a ray tracing pipeline.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
 /// <param name="pShader">Shader to bind</param>
-void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader);
+void gfxCmdBindShader(VkCommandBuffer cmd, GfxShader* pShader);
 
 /// <summary>
 /// Bind the descriptor sets of a shader with the resources currently attached.
@@ -1362,12 +1404,13 @@ void gfxCmdTraceRays(VkCommandBuffer cmd, const GfxRayTracingPipeline* pPipeline
                      uint32_t depth);
 
 /// <summary>
-/// Set default states for rendering using shader objects. Viewport, scissor and
-/// sample count are taken from the attachment set's first color attachment, or
-/// from its depth attachment if it has no color attachments.
-/// Depth testing is enabled with GFX_DEPTH_COMPARE_OP, which follows the depth
-/// convention chosen with GFX_REVERSE_Z. Blending is disabled, but the blend
-/// equation is set to the usual alpha blending, so enabling blending with
+/// Set every dynamic state of GFX graphics pipelines to a default. Viewport,
+/// scissor and sample count are taken from the attachment set's first color
+/// attachment, or from its depth attachment if it has no color attachments.
+/// The topology is a triangle list. Depth testing is enabled with
+/// GFX_DEPTH_COMPARE_OP, which follows the depth convention chosen with
+/// GFX_REVERSE_Z. Blending is disabled, but the blend equation is set to the
+/// usual alpha blending, so enabling blending with
 /// gfxDevice.fn.vkCmdSetColorBlendEnableEXT() is enough to get it.
 /// </summary>
 /// <param name="cmd">Command buffer to use</param>
@@ -1381,6 +1424,16 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
                             const VkVertexInputBindingDescription2EXT* vertexBindingDescriptions,
                             uint32_t vertexAttributeDescriptionCount,
                             const VkVertexInputAttributeDescription2EXT* vertexAttributeDescriptions);
+
+/// <summary>
+/// Set the primitive topology. Use this rather than vkCmdSetPrimitiveTopology()
+/// so that shaders bound afterwards get a pipeline for the topology's class.
+/// Switching to a topology of another class, such as from triangles to
+/// points, needs the shader to be bound again after this.
+/// </summary>
+/// <param name="cmd">Command buffer to use</param>
+/// <param name="topology">Topology to draw with</param>
+void gfxCmdSetPrimitiveTopology(VkCommandBuffer cmd, VkPrimitiveTopology topology);
 
 /// <summary>
 /// Set whether the swapchain should present with vertical synchronization. If a
@@ -1978,6 +2031,15 @@ static struct GfxMemory {
     uint32_t dedicatedCount; // Allocations with memory of their own
 } gfxMemory;
 
+// What graphics shaders bound now get their pipelines built for. Rendering
+// begun by GFX sets the attachment formats, and the topology class follows
+// gfxCmdSetPrimitiveTopology().
+static struct GfxRendering {
+    bool active; // Between beginning and ending rendering with GFX
+    GfxPipelineKey key;
+    VkPrimitiveTopology topology; // First topology of the class last set
+} gfxRendering;
+
 typedef struct GfxMemoryAllocation {
     VkDeviceMemory memory;
     VkDeviceSize offset;
@@ -2311,27 +2373,65 @@ static uint32_t getQueueFamilyIndex(VkSurfaceKHR surface, uint32_t requiredFamil
     return index;
 }
 
+// Dynamic state features of a physical device. The structures are unlinked,
+// so that they can be merged into a device create info.
+typedef struct GfxDynamicStateFeatures {
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vertexInput;
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT extended2; // Zeroed without VK_EXT_extended_dynamic_state2
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT extended3;
+    bool extended2Available;
+    bool supported; // Whether every dynamic state that GFX pipelines always have is supported
+} GfxDynamicStateFeatures;
+
+static GfxDynamicStateFeatures getDynamicStateFeatures(VkPhysicalDevice physicalDevice)
+{
+    GfxDynamicStateFeatures support = {
+        .vertexInput = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT},
+        .extended2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT},
+        .extended3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT},
+    };
+
+    // Feature structures may only be queried for extensions that are there
+    if (!deviceExtensionAvailable(physicalDevice, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME) ||
+        !deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME)) {
+        return support;
+    }
+    support.extended2Available =
+        deviceExtensionAvailable(physicalDevice, VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME);
+
+    support.vertexInput.pNext = &support.extended3;
+    support.extended3.pNext = support.extended2Available ? &support.extended2 : NULL;
+
+    VkPhysicalDeviceFeatures2 features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &support.vertexInput,
+    };
+
+    vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
+
+    support.vertexInput.pNext = NULL;
+    support.extended3.pNext = NULL;
+
+    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT* p = &support.extended3;
+    support.supported = support.vertexInput.vertexInputDynamicState && p->extendedDynamicState3RasterizationSamples &&
+                        p->extendedDynamicState3SampleMask && p->extendedDynamicState3AlphaToCoverageEnable &&
+                        p->extendedDynamicState3PolygonMode && p->extendedDynamicState3LogicOpEnable &&
+                        p->extendedDynamicState3ColorBlendEnable && p->extendedDynamicState3ColorBlendEquation &&
+                        p->extendedDynamicState3ColorWriteMask;
+
+    return support;
+}
+
 // Whether gfxCreateDevice() would accept a physical device, checked the same
 // way it checks the chosen one
 static bool deviceSupported(VkPhysicalDevice physicalDevice, uint32_t apiVersion, VkSurfaceKHR surface)
 {
     if (apiVersion < VK_API_VERSION_1_3 ||
-        !deviceExtensionAvailable(physicalDevice, VK_EXT_SHADER_OBJECT_EXTENSION_NAME) ||
         (surface && !deviceExtensionAvailable(physicalDevice, VK_KHR_SWAPCHAIN_EXTENSION_NAME))) {
         return false;
     }
 
-    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-    };
-
-    VkPhysicalDeviceFeatures2 features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &shaderObjectFeatures,
-    };
-
-    vkGetPhysicalDeviceFeatures2(physicalDevice, &features);
-    if (!shaderObjectFeatures.shaderObject) {
+    if (!getDynamicStateFeatures(physicalDevice).supported) {
         return false;
     }
 
@@ -2505,6 +2605,16 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
         return;
     }
 
+    // Graphics pipelines are built with nearly all of their state dynamic, so
+    // that only the shader and attachment formats are baked into them
+    GfxDynamicStateFeatures dynamicStateSupport = getDynamicStateFeatures(gfxDevice.physicalDevice);
+    if (!dynamicStateSupport.supported) {
+        GFX_ERROR("The chosen device lacks dynamic states that yggdrasil needs, from %s and %s",
+                  VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+        return;
+    }
+    bool dynamicLogicOp = dynamicStateSupport.extended2.extendedDynamicState2LogicOp;
+
     // Ray tracing is enabled whenever the device supports it
     bool rayTracingSupport =
         deviceExtensionAvailable(gfxDevice.physicalDevice, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
@@ -2531,9 +2641,13 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
 
     // The extensions that yggdrasil uses, followed by the requested ones that
     // are not already in the list
-    const char* ppRequiredExtensions[5];
+    const char* ppRequiredExtensions[8];
     uint32_t requiredExtensionCount = 0;
-    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_SHADER_OBJECT_EXTENSION_NAME;
+    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME;
+    ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+    if (dynamicLogicOp) {
+        ppRequiredExtensions[requiredExtensionCount++] = VK_EXT_EXTENDED_DYNAMIC_STATE_2_EXTENSION_NAME;
+    }
     if (surface) {
         ppRequiredExtensions[requiredExtensionCount++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     }
@@ -2608,9 +2722,36 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
         .dynamicRendering = VK_TRUE,
     };
 
-    VkPhysicalDeviceShaderObjectFeaturesEXT requiredShaderObjectFeatures = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
-        .shaderObject = VK_TRUE,
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT requiredVertexInputFeatures = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .vertexInputDynamicState = VK_TRUE,
+    };
+
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT requiredExtendedDynamicState2Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT,
+        .extendedDynamicState2LogicOp = VK_TRUE,
+    };
+
+    // Depth clamp and alpha to one are only dynamic when their features are
+    // enabled, as they could not be turned on otherwise
+    const VkPhysicalDeviceExtendedDynamicState3FeaturesEXT* pExtended3Support = &dynamicStateSupport.extended3;
+    bool dynamicDepthClamp =
+        pExtended3Support->extendedDynamicState3DepthClampEnable && features && features->features.depthClamp;
+    bool dynamicAlphaToOne =
+        pExtended3Support->extendedDynamicState3AlphaToOneEnable && features && features->features.alphaToOne;
+
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT requiredExtendedDynamicState3Features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT,
+        .extendedDynamicState3DepthClampEnable = dynamicDepthClamp,
+        .extendedDynamicState3PolygonMode = VK_TRUE,
+        .extendedDynamicState3RasterizationSamples = VK_TRUE,
+        .extendedDynamicState3SampleMask = VK_TRUE,
+        .extendedDynamicState3AlphaToCoverageEnable = VK_TRUE,
+        .extendedDynamicState3AlphaToOneEnable = dynamicAlphaToOne,
+        .extendedDynamicState3LogicOpEnable = VK_TRUE,
+        .extendedDynamicState3ColorBlendEnable = VK_TRUE,
+        .extendedDynamicState3ColorBlendEquation = VK_TRUE,
+        .extendedDynamicState3ColorWriteMask = VK_TRUE,
     };
 
     VkPhysicalDeviceAccelerationStructureFeaturesKHR requiredAccelerationStructureFeatures = {
@@ -2626,7 +2767,11 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     mergeFeatures(&ci, &requiredFeatures, sizeof requiredFeatures);
     mergeFeatures(&ci, &requiredVk12Features, sizeof requiredVk12Features);
     mergeFeatures(&ci, &requiredVk13Features, sizeof requiredVk13Features);
-    mergeFeatures(&ci, &requiredShaderObjectFeatures, sizeof requiredShaderObjectFeatures);
+    mergeFeatures(&ci, &requiredVertexInputFeatures, sizeof requiredVertexInputFeatures);
+    mergeFeatures(&ci, &requiredExtendedDynamicState3Features, sizeof requiredExtendedDynamicState3Features);
+    if (dynamicLogicOp) {
+        mergeFeatures(&ci, &requiredExtendedDynamicState2Features, sizeof requiredExtendedDynamicState2Features);
+    }
     if (gfxDevice.accelerationStructures) {
         mergeFeatures(&ci, &requiredAccelerationStructureFeatures, sizeof requiredAccelerationStructureFeatures);
     }
@@ -2639,36 +2784,44 @@ void gfxCreateDevice(uint32_t physicalDeviceIndex, uint32_t deviceExtensionCount
     GFX_FREE(ppExtensions);
 
     const VkPhysicalDeviceFeatures2* pFeatures = findStructure(ci.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2);
-    const VkPhysicalDeviceMeshShaderFeaturesEXT* pMeshFeatures =
-        findStructure(ci.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT);
 
     // Remember whether anisotropic filtering is enabled, so that samplers are
     // not created with a feature that the device was not created with
     gfxDevice.samplerAnisotropy = pFeatures->features.samplerAnisotropy;
 
-    // Remember which graphics stages exist on the device, so that shaders can
-    // bind the ones they do not use to null
-    gfxDevice.graphicsShaderStages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    if (pFeatures->features.tessellationShader) {
-        gfxDevice.graphicsShaderStages |=
-            VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT | VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    }
-    if (pFeatures->features.geometryShader) {
-        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_GEOMETRY_BIT;
-    }
-    if (pMeshFeatures && pMeshFeatures->taskShader) {
-        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_TASK_BIT_EXT;
-    }
-    if (pMeshFeatures && pMeshFeatures->meshShader) {
-        gfxDevice.graphicsShaderStages |= VK_SHADER_STAGE_MESH_BIT_EXT;
-    }
+    // Remember which of the optional states are dynamic, so that default states
+    // only set those that pipelines have
+    gfxDevice.dynamicLogicOp = dynamicLogicOp;
+    gfxDevice.dynamicDepthClamp = dynamicDepthClamp;
+    gfxDevice.dynamicAlphaToOne = dynamicAlphaToOne;
+
+    VkPhysicalDeviceExtendedDynamicState3PropertiesEXT extendedDynamicState3Properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT,
+    };
+    VkPhysicalDeviceProperties2 properties = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+        .pNext = &extendedDynamicState3Properties,
+    };
+    vkGetPhysicalDeviceProperties2(gfxDevice.physicalDevice, &properties);
+    gfxDevice.primitiveTopologyUnrestricted = extendedDynamicState3Properties.dynamicPrimitiveTopologyUnrestricted;
+
+    VkPipelineCacheCreateInfo pipelineCacheCreateInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO,
+    };
+    VK_CHECK(vkCreatePipelineCache(gfxDevice.device, &pipelineCacheCreateInfo, NULL, &gfxDevice.pipelineCache));
 
     // Resolve extension entry points once, rather than on every call
 #define GFX_LOAD_FN(name) gfxDevice.fn.name = (PFN_##name)vkGetDeviceProcAddr(gfxDevice.device, #name)
-    GFX_LOAD_FN(vkCreateShadersEXT);
-    GFX_LOAD_FN(vkDestroyShaderEXT);
-    GFX_LOAD_FN(vkCmdBindShadersEXT);
     GFX_LOAD_FN(vkCmdSetVertexInputEXT);
+    if (dynamicLogicOp) {
+        GFX_LOAD_FN(vkCmdSetLogicOpEXT);
+    }
+    if (dynamicDepthClamp) {
+        GFX_LOAD_FN(vkCmdSetDepthClampEnableEXT);
+    }
+    if (dynamicAlphaToOne) {
+        GFX_LOAD_FN(vkCmdSetAlphaToOneEnableEXT);
+    }
     GFX_LOAD_FN(vkCmdSetRasterizationSamplesEXT);
     GFX_LOAD_FN(vkCmdSetSampleMaskEXT);
     GFX_LOAD_FN(vkCmdSetAlphaToCoverageEnableEXT);
@@ -2730,6 +2883,9 @@ void gfxDestroyDevice()
 
     if (gfxDevice.commandPool) {
         vkDestroyCommandPool(gfxDevice.device, gfxDevice.commandPool, NULL);
+    }
+    if (gfxDevice.pipelineCache) {
+        vkDestroyPipelineCache(gfxDevice.device, gfxDevice.pipelineCache, NULL);
     }
     if (gfxDevice.device) {
         vkDestroyDevice(gfxDevice.device, NULL);
@@ -4639,6 +4795,29 @@ static void beginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachment
     };
 
     vkCmdBeginRendering(cmd, &renderingInfo);
+
+    // Shaders bound from here on render to these attachments. The rendering
+    // info has no stencil attachment, so neither do the pipelines.
+    if (pAttachmentSet->colorAttachmentCount > GFX_MAX_COLOR_ATTACHMENTS) {
+        GFX_ERROR("%" PRIu32 " color attachments, but GFX_MAX_COLOR_ATTACHMENTS is %d",
+                  pAttachmentSet->colorAttachmentCount, GFX_MAX_COLOR_ATTACHMENTS);
+        return;
+    }
+    memset(&gfxRendering.key, 0, sizeof gfxRendering.key);
+    gfxRendering.key.colorAttachmentCount = pAttachmentSet->colorAttachmentCount;
+    for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
+        gfxRendering.key.colorAttachmentFormats[i] = pAttachmentSet->pFormats[i];
+    }
+    gfxRendering.key.depthAttachmentFormat =
+        pAttachmentSet->pDepthAttachment ? pAttachmentSet->pDepthAttachment->format : VK_FORMAT_UNDEFINED;
+    gfxRendering.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    gfxRendering.active = true;
+}
+
+static void endRendering(VkCommandBuffer cmd)
+{
+    vkCmdEndRendering(cmd);
+    gfxRendering.active = false;
 }
 
 void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet, VkClearValue clearValue,
@@ -4655,7 +4834,7 @@ void gfxCmdBeginRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentS
 void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet)
 {
     GFX_UNUSED(pAttachmentSet);
-    vkCmdEndRendering(cmd);
+    endRendering(cmd);
 }
 
 // Report a failure as an error, or as a warning when the caller can recover
@@ -4669,7 +4848,8 @@ void gfxCmdEndRendering(VkCommandBuffer cmd, const GfxAttachment* pAttachmentSet
         }                                                                                                              \
     } while (0)
 
-// Stages that are built into a ray tracing pipeline rather than shader objects
+// Stages that are built into a ray tracing pipeline rather than a pipeline of
+// the shader itself
 #define GFX_RAY_TRACING_STAGES                                                                                         \
     (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |          \
      VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR)
@@ -5492,6 +5672,7 @@ static bool loadStage(GfxShaderStage* pStage, const GfxShaderStageDesc* pDesc, b
 {
     pStage->stage = pDesc->stage;
     pStage->pSpecializationInfo = copySpecializationInfo(pDesc->pSpecializationInfo);
+    pStage->patchControlPoints = pDesc->patchControlPoints;
 
     if (pDesc->pPath) {
         pStage->pPath = copyString(pDesc->pPath, SIZE_MAX);
@@ -5812,92 +5993,223 @@ static bool createLayouts(GfxShader* pShader, bool fatal)
     return true;
 }
 
-// The stage that follows a stage in the shader, or the fragment stage if the
-// shader has none, so that the stage can be used with any fragment shader
-static VkShaderStageFlags nextStage(VkShaderStageFlagBits stage, VkShaderStageFlags stages)
-{
-    switch (stage) {
-    case VK_SHADER_STAGE_VERTEX_BIT:
-        if (stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) {
-            return VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-        }
-        return (stages & VK_SHADER_STAGE_GEOMETRY_BIT) ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
-    case VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT:
-        return VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-    case VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT:
-        return (stages & VK_SHADER_STAGE_GEOMETRY_BIT) ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_FRAGMENT_BIT;
-    case VK_SHADER_STAGE_GEOMETRY_BIT:
-        return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case VK_SHADER_STAGE_TASK_BIT_EXT:
-        return VK_SHADER_STAGE_MESH_BIT_EXT;
-    case VK_SHADER_STAGE_MESH_BIT_EXT:
-        return VK_SHADER_STAGE_FRAGMENT_BIT;
-    default:
-        return 0;
-    }
-}
-
-static bool buildShaderObjects(GfxShader* pShader, bool fatal)
+// Create the shader modules of the stages, and the pipeline of a compute
+// shader. Graphics pipelines are built when the shader is bound, once the
+// attachments are known.
+static bool buildPipelines(GfxShader* pShader, bool fatal)
 {
     // Ray tracing stages are built into ray tracing pipelines instead
     if (pShader->stages & GFX_RAY_TRACING_STAGES) {
         return true;
     }
 
-    VkDescriptorSetLayout* pSetLayouts = allocZeroed(GFX_MAX(pShader->setCount, 1), sizeof *pSetLayouts);
-    for (uint32_t s = 0; s < pShader->setCount; s++) {
-        pSetLayouts[s] = pShader->pSets[s].layout;
-    }
-
-    VkShaderCreateInfoEXT* pInfos = allocZeroed(pShader->stageCount, sizeof *pInfos);
-    VkShaderEXT* pShaders = allocZeroed(pShader->stageCount, sizeof *pShaders);
-
-    // Graphics stages are linked, which allows optimizing across them
-    bool link = pShader->stageCount > 1;
-
     for (uint32_t i = 0; i < pShader->stageCount; i++) {
-        const GfxShaderStage* pStage = &pShader->pStages[i];
+        GfxShaderStage* pStage = &pShader->pStages[i];
 
-        VkShaderCreateFlagsEXT flags = link ? VK_SHADER_CREATE_LINK_STAGE_BIT_EXT : 0;
-        if (pStage->stage == VK_SHADER_STAGE_MESH_BIT_EXT && !(pShader->stages & VK_SHADER_STAGE_TASK_BIT_EXT)) {
-            flags |= VK_SHADER_CREATE_NO_TASK_SHADER_BIT_EXT;
-        }
-
-        pInfos[i] = (VkShaderCreateInfoEXT){
-            .sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
-            .flags = flags,
-            .stage = pStage->stage,
-            .nextStage = nextStage(pStage->stage, pShader->stages),
-            .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+        VkShaderModuleCreateInfo ci = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
             .codeSize = pStage->codeSize,
             .pCode = pStage->pCode,
+        };
+
+        VkResult result = vkCreateShaderModule(gfxDevice.device, &ci, NULL, &pStage->module);
+        if (result < 0) {
+            GFX_FAIL(fatal, "Failed to create a shader module for %s: %s", shaderName(pShader),
+                     gfxResultString(result));
+            return false;
+        }
+
+        const char* pName = pStage->pPath ? pStage->pPath : shaderName(pShader);
+        gfxSetDebugName(VK_OBJECT_TYPE_SHADER_MODULE, (uint64_t)pStage->module, pName);
+    }
+
+    if (!(pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
+        return true;
+    }
+
+    const GfxShaderStage* pStage = &pShader->pStages[0];
+    VkComputePipelineCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .stage =
+            {
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = pStage->module,
+                .pName = "main",
+                .pSpecializationInfo = pStage->pSpecializationInfo,
+            },
+        .layout = pShader->pipelineLayout,
+    };
+
+    VkPipeline pipeline;
+    VkResult result = vkCreateComputePipelines(gfxDevice.device, gfxDevice.pipelineCache, 1, &ci, NULL, &pipeline);
+    if (result < 0) {
+        GFX_FAIL(fatal, "Failed to create a compute pipeline for %s: %s", shaderName(pShader), gfxResultString(result));
+        return false;
+    }
+    gfxSetDebugName(VK_OBJECT_TYPE_PIPELINE, (uint64_t)pipeline, shaderName(pShader));
+
+    pShader->pipelineCount = pShader->pipelineCapacity = 1;
+    pShader->pPipelines = allocZeroed(1, sizeof *pShader->pPipelines);
+    pShader->pPipelines[0].pipeline = pipeline;
+
+    return true;
+}
+
+// Build a graphics pipeline for a shader with every state dynamic that the
+// device allows, so that only the stages, the attachment formats and possibly
+// the topology class are baked into it
+static VkPipeline createGraphicsPipeline(const GfxShader* pShader, const GfxPipelineKey* pKey)
+{
+    // A graphics shader has at most one of each of the seven graphics stages
+    VkPipelineShaderStageCreateInfo stages[7];
+    uint32_t patchControlPoints = 3;
+    for (uint32_t i = 0; i < pShader->stageCount; i++) {
+        const GfxShaderStage* pStage = &pShader->pStages[i];
+        stages[i] = (VkPipelineShaderStageCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = pStage->stage,
+            .module = pStage->module,
             .pName = "main",
-            .setLayoutCount = pShader->setCount,
-            .pSetLayouts = pSetLayouts,
-            .pushConstantRangeCount = pShader->pushConstantRange.size ? 1 : 0,
-            .pPushConstantRanges = &pShader->pushConstantRange,
             .pSpecializationInfo = pStage->pSpecializationInfo,
         };
-    }
-
-    VkResult result = gfxDevice.fn.vkCreateShadersEXT(gfxDevice.device, pShader->stageCount, pInfos, NULL, pShaders);
-
-    bool ok = result >= 0;
-    if (ok) {
-        for (uint32_t i = 0; i < pShader->stageCount; i++) {
-            pShader->pStages[i].shader = pShaders[i];
-            const char* pName = pShader->pStages[i].pPath ? pShader->pStages[i].pPath : shaderName(pShader);
-            gfxSetDebugName(VK_OBJECT_TYPE_SHADER_EXT, (uint64_t)pShaders[i], pName);
+        if (pStage->stage == VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT && pStage->patchControlPoints) {
+            patchControlPoints = pStage->patchControlPoints;
         }
-    } else {
-        GFX_FAIL(fatal, "Failed to create shader objects for %s: %s", shaderName(pShader), gfxResultString(result));
     }
 
-    GFX_FREE(pShaders);
-    GFX_FREE(pInfos);
-    GFX_FREE(pSetLayouts);
+    // Mesh pipelines have no vertex input or input assembly
+    bool mesh = pShader->stages & VK_SHADER_STAGE_MESH_BIT_EXT;
+    bool tessellation = pShader->stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
 
-    return ok;
+    static const VkDynamicState commonStates[] = {
+        VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
+        VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT,
+        VK_DYNAMIC_STATE_LINE_WIDTH,
+        VK_DYNAMIC_STATE_DEPTH_BIAS,
+        VK_DYNAMIC_STATE_BLEND_CONSTANTS,
+        VK_DYNAMIC_STATE_DEPTH_BOUNDS,
+        VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
+        VK_DYNAMIC_STATE_STENCIL_WRITE_MASK,
+        VK_DYNAMIC_STATE_STENCIL_REFERENCE,
+        VK_DYNAMIC_STATE_CULL_MODE,
+        VK_DYNAMIC_STATE_FRONT_FACE,
+        VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+        VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE,
+        VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE,
+        VK_DYNAMIC_STATE_STENCIL_OP,
+        VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE,
+        VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE,
+        VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT,
+        VK_DYNAMIC_STATE_SAMPLE_MASK_EXT,
+        VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT,
+        VK_DYNAMIC_STATE_POLYGON_MODE_EXT,
+        VK_DYNAMIC_STATE_LOGIC_OP_ENABLE_EXT,
+    };
+
+    VkDynamicState dynamicStates[GFX_ARRAY_LEN(commonStates) + 9];
+    uint32_t dynamicStateCount = 0;
+    for (uint32_t i = 0; i < GFX_ARRAY_LEN(commonStates); i++) {
+        dynamicStates[dynamicStateCount++] = commonStates[i];
+    }
+
+    // Dynamic states that are set per color attachment have to be set for a
+    // draw, so they are left out when there is nothing to set them for
+    if (pKey->colorAttachmentCount) {
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT;
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT;
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT;
+    }
+    if (!mesh) {
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE;
+    }
+    if (gfxDevice.dynamicLogicOp) {
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_LOGIC_OP_EXT;
+    }
+    if (gfxDevice.dynamicDepthClamp) {
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT;
+    }
+    if (gfxDevice.dynamicAlphaToOne) {
+        dynamicStates[dynamicStateCount++] = VK_DYNAMIC_STATE_ALPHA_TO_ONE_ENABLE_EXT;
+    }
+
+    // The state structures are required, but what they hold is dynamic and
+    // ignored, apart from the topology class, the patch size and a logic op
+    // that cannot be made dynamic
+    VkPipelineVertexInputStateCreateInfo vertexInputState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+    };
+    VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+        .topology = pKey->topology,
+    };
+    VkPipelineTessellationStateCreateInfo tessellationState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO,
+        .patchControlPoints = patchControlPoints,
+    };
+    VkPipelineViewportStateCreateInfo viewportState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+    };
+    VkPipelineRasterizationStateCreateInfo rasterizationState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+        .lineWidth = 1.0f,
+    };
+    VkPipelineMultisampleStateCreateInfo multisampleState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+    };
+    VkPipelineDepthStencilStateCreateInfo depthStencilState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+    };
+    VkPipelineColorBlendAttachmentState colorBlendAttachments[GFX_MAX_COLOR_ATTACHMENTS] = {0};
+    VkPipelineColorBlendStateCreateInfo colorBlendState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .logicOp = VK_LOGIC_OP_COPY,
+        .attachmentCount = pKey->colorAttachmentCount,
+        .pAttachments = colorBlendAttachments,
+    };
+    VkPipelineDynamicStateCreateInfo dynamicState = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
+        .dynamicStateCount = dynamicStateCount,
+        .pDynamicStates = dynamicStates,
+    };
+    VkPipelineRenderingCreateInfo renderingInfo = {
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+        .colorAttachmentCount = pKey->colorAttachmentCount,
+        .pColorAttachmentFormats = pKey->colorAttachmentFormats,
+        .depthAttachmentFormat = pKey->depthAttachmentFormat,
+        .stencilAttachmentFormat = pKey->stencilAttachmentFormat,
+    };
+
+    VkGraphicsPipelineCreateInfo ci = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .pNext = &renderingInfo,
+        .stageCount = pShader->stageCount,
+        .pStages = stages,
+        .pVertexInputState = mesh ? NULL : &vertexInputState,
+        .pInputAssemblyState = mesh ? NULL : &inputAssemblyState,
+        .pTessellationState = tessellation ? &tessellationState : NULL,
+        .pViewportState = &viewportState,
+        .pRasterizationState = &rasterizationState,
+        .pMultisampleState = &multisampleState,
+        .pDepthStencilState = &depthStencilState,
+        .pColorBlendState = &colorBlendState,
+        .pDynamicState = &dynamicState,
+        .layout = pShader->pipelineLayout,
+    };
+
+    VkPipeline pipeline;
+    VK_CHECK(vkCreateGraphicsPipelines(gfxDevice.device, gfxDevice.pipelineCache, 1, &ci, NULL, &pipeline));
+    gfxSetDebugName(VK_OBJECT_TYPE_PIPELINE, (uint64_t)pipeline, shaderName(pShader));
+
+    GFX_DEBUG("Created graphics pipeline for %s (%" PRIu32 " color attachments, topology class %d)",
+              shaderName(pShader), pKey->colorAttachmentCount, (int)pKey->topology);
+
+    return pipeline;
 }
 
 static bool createShader(GfxShader* pShader, uint32_t stageCount, const GfxShaderStageDesc* pDescs, bool fatal)
@@ -5948,7 +6260,7 @@ static bool createShader(GfxShader* pShader, uint32_t stageCount, const GfxShade
         }
     }
 
-    if (!createLayouts(pShader, fatal) || !buildShaderObjects(pShader, fatal)) {
+    if (!createLayouts(pShader, fatal) || !buildPipelines(pShader, fatal)) {
         goto fail;
     }
 
@@ -5983,10 +6295,15 @@ void gfxDestroyShader(GfxShader* pShader)
 {
     vkDeviceWaitIdle(gfxDevice.device);
 
+    for (uint32_t i = 0; i < pShader->pipelineCount; i++) {
+        vkDestroyPipeline(gfxDevice.device, pShader->pPipelines[i].pipeline, NULL);
+    }
+    GFX_FREE(pShader->pPipelines);
+
     for (uint32_t i = 0; i < pShader->stageCount; i++) {
         GfxShaderStage* pStage = &pShader->pStages[i];
-        if (pStage->shader) {
-            gfxDevice.fn.vkDestroyShaderEXT(gfxDevice.device, pStage->shader, NULL);
+        if (pStage->module) {
+            vkDestroyShaderModule(gfxDevice.device, pStage->module, NULL);
         }
         GFX_FREE(pStage->pPath);
         GFX_FREE(pStage->pCode);
@@ -6052,6 +6369,7 @@ bool gfxReloadShader(GfxShader* pShader)
             .codeSize = pStage->pPath ? 0 : pStage->codeSize,
             .stage = pStage->stage,
             .pSpecializationInfo = pStage->pSpecializationInfo,
+            .patchControlPoints = pStage->patchControlPoints,
         };
     }
 
@@ -6258,45 +6576,55 @@ void gfxSetShaderAccelerationStructure(GfxShader* pShader, const char* pName,
     pBinding->pAccelerationStructure = pAccelerationStructure;
 }
 
-void gfxCmdBindShader(VkCommandBuffer cmd, const GfxShader* pShader)
+void gfxCmdBindShader(VkCommandBuffer cmd, GfxShader* pShader)
 {
     if (pShader->stages & GFX_RAY_TRACING_STAGES) {
         GFX_ERROR("%s has ray tracing stages, which are used through a ray tracing pipeline", shaderName(pShader));
         return;
     }
 
-    static const VkShaderStageFlagBits graphicsStages[] = {
-        VK_SHADER_STAGE_VERTEX_BIT,
-        VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
-        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
-        VK_SHADER_STAGE_GEOMETRY_BIT,
-        VK_SHADER_STAGE_FRAGMENT_BIT,
-        VK_SHADER_STAGE_TASK_BIT_EXT,
-        VK_SHADER_STAGE_MESH_BIT_EXT,
-    };
-
-    // A shader has at most one of each graphics stage, or a single compute stage
-    VkShaderStageFlagBits stages[GFX_ARRAY_LEN(graphicsStages)];
-    VkShaderEXT shaders[GFX_ARRAY_LEN(graphicsStages)];
-    uint32_t count = 0;
-
-    for (uint32_t i = 0; i < pShader->stageCount; i++) {
-        stages[count] = pShader->pStages[i].stage;
-        shaders[count++] = pShader->pStages[i].shader;
+    if (pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pShader->pPipelines[0].pipeline);
+        return;
     }
 
-    // Graphics stages the shader does not have are unbound, so that nothing
-    // from a previously bound shader is left behind
-    if (!(pShader->stages & VK_SHADER_STAGE_COMPUTE_BIT)) {
-        for (uint32_t i = 0; i < GFX_ARRAY_LEN(graphicsStages); i++) {
-            if ((gfxDevice.graphicsShaderStages & graphicsStages[i]) && !(pShader->stages & graphicsStages[i])) {
-                stages[count] = graphicsStages[i];
-                shaders[count++] = VK_NULL_HANDLE;
-            }
+    if (!gfxRendering.active) {
+        GFX_ERROR("%s is a graphics shader, which can only be bound in a graphics pass or after gfxCmdBeginRendering()",
+                  shaderName(pShader));
+        return;
+    }
+
+    // Tessellation pipelines always take patches, and mesh pipelines ignore
+    // the topology
+    GfxPipelineKey key = gfxRendering.key;
+    if (pShader->stages & VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) {
+        key.topology = VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    } else if ((pShader->stages & VK_SHADER_STAGE_MESH_BIT_EXT) || gfxDevice.primitiveTopologyUnrestricted) {
+        key.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    } else {
+        key.topology = gfxRendering.topology;
+    }
+
+    // There are only ever a few pipelines per shader, so they are searched in
+    // order
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    for (uint32_t i = 0; i < pShader->pipelineCount && !pipeline; i++) {
+        if (!memcmp(&pShader->pPipelines[i].key, &key, sizeof key)) {
+            pipeline = pShader->pPipelines[i].pipeline;
         }
     }
 
-    gfxDevice.fn.vkCmdBindShadersEXT(cmd, count, stages, shaders);
+    if (!pipeline) {
+        if (pShader->pipelineCount == pShader->pipelineCapacity) {
+            pShader->pipelineCapacity = GFX_MAX(pShader->pipelineCapacity * 2, 4);
+            pShader->pPipelines =
+                GFX_REALLOC(pShader->pPipelines, pShader->pipelineCapacity * sizeof *pShader->pPipelines);
+        }
+        pipeline = createGraphicsPipeline(pShader, &key);
+        pShader->pPipelines[pShader->pipelineCount++] = (GfxShaderPipeline){.key = key, .pipeline = pipeline};
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 }
 
 static VkPipelineBindPoint shaderBindPoint(const GfxShader* pShader)
@@ -7212,23 +7540,39 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
 
     gfxDevice.fn.vkCmdSetVertexInputEXT(cmd, vertexBindingDescriptionCount, vertexBindingDescriptions,
                                         vertexAttributeDescriptionCount, vertexAttributeDescriptions);
-    vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    gfxCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
     vkCmdSetPrimitiveRestartEnable(cmd, VK_FALSE);
 
     const VkSampleMask sampleMask = ~0u;
     gfxDevice.fn.vkCmdSetRasterizationSamplesEXT(cmd, samples);
     gfxDevice.fn.vkCmdSetSampleMaskEXT(cmd, samples, &sampleMask);
     gfxDevice.fn.vkCmdSetAlphaToCoverageEnableEXT(cmd, VK_FALSE);
+    if (gfxDevice.dynamicAlphaToOne) {
+        gfxDevice.fn.vkCmdSetAlphaToOneEnableEXT(cmd, VK_FALSE);
+    }
     gfxDevice.fn.vkCmdSetPolygonModeEXT(cmd, VK_POLYGON_MODE_FILL);
     vkCmdSetCullMode(cmd, VK_CULL_MODE_NONE);
     vkCmdSetFrontFace(cmd, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    vkCmdSetLineWidth(cmd, 1.0f);
+    if (gfxDevice.dynamicDepthClamp) {
+        gfxDevice.fn.vkCmdSetDepthClampEnableEXT(cmd, VK_FALSE);
+    }
 
+    // Pipelines also have the parameters of disabled tests dynamic, so these
+    // are set as well
     vkCmdSetDepthTestEnable(cmd, VK_TRUE);
     vkCmdSetDepthWriteEnable(cmd, VK_TRUE);
     vkCmdSetDepthCompareOp(cmd, GFX_DEPTH_COMPARE_OP);
     vkCmdSetDepthBoundsTestEnable(cmd, VK_FALSE);
+    vkCmdSetDepthBounds(cmd, 0.0f, 1.0f);
     vkCmdSetDepthBiasEnable(cmd, VK_FALSE);
+    vkCmdSetDepthBias(cmd, 0.0f, 0.0f, 0.0f);
     vkCmdSetStencilTestEnable(cmd, VK_FALSE);
+    vkCmdSetStencilOp(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP, VK_STENCIL_OP_KEEP,
+                      VK_COMPARE_OP_ALWAYS);
+    vkCmdSetStencilCompareMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, ~0u);
+    vkCmdSetStencilWriteMask(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, ~0u);
+    vkCmdSetStencilReference(cmd, VK_STENCIL_FACE_FRONT_AND_BACK, 0);
 
     const VkBool32 colorBlendEnable = VK_FALSE;
     const VkColorBlendEquationEXT colorBlendEquation = {
@@ -7241,12 +7585,42 @@ void gfxCmdSetDefaultStates(VkCommandBuffer cmd, const GfxAttachment* pAttachmen
     };
     const VkColorComponentFlags colorComponents =
         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    const float blendConstants[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     gfxDevice.fn.vkCmdSetLogicOpEnableEXT(cmd, VK_FALSE);
+    if (gfxDevice.dynamicLogicOp) {
+        gfxDevice.fn.vkCmdSetLogicOpEXT(cmd, VK_LOGIC_OP_COPY);
+    }
+    vkCmdSetBlendConstants(cmd, blendConstants);
     for (uint32_t i = 0; i < pAttachmentSet->colorAttachmentCount; i++) {
         gfxDevice.fn.vkCmdSetColorBlendEnableEXT(cmd, i, 1, &colorBlendEnable);
         gfxDevice.fn.vkCmdSetColorBlendEquationEXT(cmd, i, 1, &colorBlendEquation);
         gfxDevice.fn.vkCmdSetColorWriteMaskEXT(cmd, i, 1, &colorComponents);
     }
+}
+
+// The first topology of the class that a topology belongs to. Pipelines are
+// created with these, as the topology can only change within its class.
+static VkPrimitiveTopology topologyClass(VkPrimitiveTopology topology)
+{
+    switch (topology) {
+    case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+        return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+        return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    case VK_PRIMITIVE_TOPOLOGY_PATCH_LIST:
+        return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+    default:
+        return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    }
+}
+
+void gfxCmdSetPrimitiveTopology(VkCommandBuffer cmd, VkPrimitiveTopology topology)
+{
+    vkCmdSetPrimitiveTopology(cmd, topology);
+    gfxRendering.topology = topologyClass(topology);
 }
 
 
@@ -7941,7 +8315,7 @@ void gfxCmdExecuteRenderGraph(VkCommandBuffer cmd, GfxRenderGraph* pGraph)
 
             beginRendering(cmd, &pPass->attachment);
             pPass->function(cmd, &pPass->attachment, pPass->pUserData);
-            vkCmdEndRendering(cmd);
+            endRendering(cmd);
         } else {
             pPass->function(cmd, NULL, pPass->pUserData);
         }

@@ -9,8 +9,9 @@ Summary of features:
 
 - Instance, device and swapchain creation, with validation layers in debug builds.
 - Buffers, images and textures suballocated from shared device memory, with batched uploads.
-- Shaders built on `VK_EXT_shader_object`. GLSL is compiled at runtime, supports `#include`
-  and hot reloading, and descriptor layouts are reflected from the SPIR-V.
+- Shaders whose graphics pipelines keep nearly all state dynamic and are built on demand for
+  the attachments they render to. GLSL is compiled at runtime, supports `#include` and hot
+  reloading, and descriptor layouts are reflected from the SPIR-V.
 - Resources attached to shaders by their GLSL names, with no manual descriptor set handling.
 - A render graph that owns the frame's images and records all barriers and layout transitions.
 - Ray tracing with acceleration structures and generated shader binding tables.
@@ -21,8 +22,8 @@ GLFW and [vecmat](https://github.com/rikardolajos/vecmat).
 
 ## Requirements
 
-- A device supporting Vulkan 1.3 and `VK_EXT_shader_object`. Ray tracing is enabled when
-  supported.
+- A device supporting Vulkan 1.3, `VK_EXT_extended_dynamic_state3` and
+  `VK_EXT_vertex_input_dynamic_state`. Ray tracing is enabled when supported.
 - The Vulkan SDK, which provides `glslang`, `SPIRV-Tools`, `SPIRV-Tools-opt` and
   `glslang-default-resource-limits`.
 - A C17 compiler on 64-bit Windows or Linux. MSVC requires `/Zc:preprocessor`.
@@ -178,6 +179,29 @@ int main()
 Shader resources are attached by the instance name of a block, or by the block name when
 the block has no instance name, for example `gfxSetShaderBuffer(&shader, "camera", &buffer)`.
 Resources are referenced by pointer and must remain at the same address while attached.
+
+### Pipelines and dynamic state
+
+A graphics shader is bound while rendering, in a graphics pass or between
+`gfxCmdBeginRendering()` and `gfxCmdEndRendering()`. The first time it is bound for a set of
+attachment formats, a pipeline is built for them and kept with the shader. Every other state is
+dynamic, so `gfxCmdSetDefaultStates()` is followed by plain `vkCmdSet*` calls for whatever a
+pass needs, before or after binding.
+
+The one exception is the primitive topology class (points, lines or triangles). On devices
+without `dynamicPrimitiveTopologyUnrestricted` it is part of the pipeline, so set it with
+`gfxCmdSetPrimitiveTopology()` before binding the shader:
+
+```c
+gfxCmdSetDefaultStates(cmd, pAttachment, 0, NULL, 0, NULL);
+gfxCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+gfxCmdBindShader(cmd, &shader);
+```
+
+The logic op, depth clamp and alpha to one are dynamic when the device supports it, as
+reported by `gfxDevice.dynamicLogicOp`, `gfxDevice.dynamicDepthClamp` and
+`gfxDevice.dynamicAlphaToOne`. Patch control points are fixed per shader through
+`GfxShaderStageDesc::patchControlPoints` on the tessellation control stage.
 Buffers, textures, multisampling and depth are covered by the rasterizer example; compute
 and ray tracing passes by the particles and raytracer examples.
 
@@ -238,6 +262,7 @@ The following macros are defined before including `gfx.h`:
 | `GFX_UPLOAD_STAGING_SIZE` | 32 MiB | Staging memory per upload batch |
 | `GFX_UPLOAD_BATCHES` | 3 | Upload batches in flight |
 | `GFX_MAX_PASS_RESOURCES` | 8 | Inputs and outputs per render graph pass |
+| `GFX_MAX_COLOR_ATTACHMENTS` | 8 | Color attachments a graphics pipeline renders to |
 | `GFX_MAX_TIMERS` | 64 | GPU timers per frame |
 
 All functions are documented at their declarations in [`gfx.h`](gfx.h).

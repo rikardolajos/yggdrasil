@@ -132,7 +132,8 @@ static void cmdSetRenderingStates(VkCommandBuffer cmd, const GfxAttachment* pAtt
     // is no vertex input to describe
     gfxCmdSetDefaultStates(cmd, pAttachmentSet, 0, NULL, 0, NULL);
 
-    vkCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+    // Points have to be configured explicitly
+    gfxCmdSetPrimitiveTopology(cmd, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
     vkCmdSetDepthTestEnable(cmd, VK_FALSE);
     vkCmdSetDepthWriteEnable(cmd, VK_FALSE);
 
