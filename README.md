@@ -58,9 +58,9 @@ tested.
 
 [`ci.yml`](.github/workflows/ci.yml) builds the examples in debug, with validation layers
 and `GFX_EXIT_ON_ERROR`, and runs each of them for ten seconds on Windows and Linux with the
-lavapipe software driver and on macOS with KosmicKrisp. An example passes if it is still
-running by then, as errors end it early. A second Linux run builds with
-`GFX_BAKE_PIPELINE_STATE`. The raytracer is skipped where the driver has no ray tracing.
+lavapipe software driver. An example passes if it is still running by then, as errors end it
+early. A second Linux run builds with `GFX_BAKE_PIPELINE_STATE`. On macOS the examples are
+only built, as KosmicKrisp finds no usable GPU in the runners' virtual machines.
 
 | Example | Demonstrates |
 | --- | --- |

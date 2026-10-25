@@ -13,22 +13,27 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Software Vulkan drivers, as hosted runners have no GPU. Lavapipe has
-          # every dynamic state, so one Linux run bakes them all to cover the
-          # pipelines that devices without them get.
+          # Hosted runners have no GPU, so the examples run on the lavapipe
+          # software driver. Lavapipe has every dynamic state, so one Linux run
+          # bakes them all to cover the pipelines that devices without them get.
           - name: Windows (lavapipe)
             os: windows-latest
             bake: OFF
+            run: true
           - name: Linux (lavapipe)
             os: ubuntu-24.04
             bake: OFF
+            run: true
           - name: Linux (lavapipe, baked state)
             os: ubuntu-24.04
             bake: ON
-          # KosmicKrisp needs Metal 4, so macOS 26 on Apple Silicon
-          - name: macOS (KosmicKrisp)
+            run: true
+          # KosmicKrisp finds no usable GPU in the macOS runners' virtual
+          # machines, so the examples are only built there
+          - name: macOS (build only)
             os: macos-26
             bake: OFF
+            run: false
 
     defaults:
       run:
@@ -45,11 +50,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwayland-dev libxkbcommon-dev xorg-dev mesa-vulkan-drivers xvfb
 
+      # A cached SDK on Windows comes without the Vulkan runtime and the layer
+      # registration that the installer does, so it is installed every time
       - name: Install Vulkan SDK
         uses: jakoch/install-vulkan-sdk-action@v1
         with:
           install_lavapipe: ${{ runner.os == 'Windows' }}
-          cache: true
+          cache: ${{ runner.os != 'Windows' }}
 
       # Validation layers report errors, which exit the examples with a
       # failure status rather than waiting for a debugger
@@ -64,6 +71,7 @@ jobs:
         run: cmake --build build --config Debug --parallel
 
       - name: Select Vulkan driver and layers
+        if: matrix.run
         run: |
           case "$RUNNER_OS" in
             Linux)
@@ -75,11 +83,6 @@ jobs:
               driver=$(cygpath -w "$(find /c/lavapipe -name '*lvp_icd*.json' | head -n 1)")
               layers=$(cygpath -w "$VULKAN_SDK/Bin")
               tools="$VULKAN_SDK/Bin"
-              ;;
-            macOS)
-              driver=$(find "$VULKAN_SDK/.." -name '*kosmickrisp*icd*.json' | head -n 1)
-              layers="$VULKAN_SDK/share/vulkan/explicit_layer.d"
-              tools="$VULKAN_SDK/bin"
               ;;
           esac
           if [ -z "$driver" ] || [ ! -f "$driver" ]; then
@@ -94,9 +97,11 @@ jobs:
       # What the loader finds with the driver selected, for when the examples
       # cannot create a device
       - name: Show Vulkan devices
+        if: matrix.run
         run: vulkaninfo --summary || vulkaninfoSDK --summary || true
 
       - name: Run examples
+        if: matrix.run
         timeout-minutes: 10
         run: |
           if [ "$RUNNER_OS" = Linux ]; then

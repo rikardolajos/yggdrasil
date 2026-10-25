@@ -24,6 +24,10 @@ if (GFX_EXIT_ON_ERROR)
     add_compile_definitions(GFX_EXIT_ON_ERROR)
 endif()
 
+# Added before the libraries below, which GLFW does not need and would otherwise
+# pass on to the examples a second time
+add_subdirectory(submodules)
+
 find_package(Vulkan REQUIRED)
 include_directories(${Vulkan_INCLUDE_DIRS})
 link_libraries(${Vulkan_LIBRARIES})
@@ -47,7 +51,6 @@ elseif (UNIX)
     link_libraries(stdc++ m Threads::Threads)
 endif()
 
-add_subdirectory(submodules)
 include_directories(submodules/glfw/include)
 include_directories(submodules/stb)
 include_directories(submodules/vecmat)
