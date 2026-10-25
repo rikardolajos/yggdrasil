@@ -67,7 +67,7 @@ jobs:
         run: |
           case "$RUNNER_OS" in
             Linux)
-              driver=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+              driver=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' | head -n 1)
               layers="$VULKAN_SDK/share/vulkan/explicit_layer.d"
               tools="$VULKAN_SDK/bin"
               ;;
@@ -82,7 +82,7 @@ jobs:
               tools="$VULKAN_SDK/bin"
               ;;
           esac
-          if [ -z "$driver" ]; then
+          if [ -z "$driver" ] || [ ! -f "$driver" ]; then
             echo "::error::No Vulkan driver found"
             exit 1
           fi
@@ -90,6 +90,11 @@ jobs:
           echo "VK_DRIVER_FILES=$driver" >> "$GITHUB_ENV"
           echo "VK_ADD_LAYER_PATH=$layers" >> "$GITHUB_ENV"
           echo "$tools" >> "$GITHUB_PATH" # vulkaninfo, to tell whether there is ray tracing
+
+      # What the loader finds with the driver selected, for when the examples
+      # cannot create a device
+      - name: Show Vulkan devices
+        run: vulkaninfo --summary || vulkaninfoSDK --summary || true
 
       - name: Run examples
         timeout-minutes: 10

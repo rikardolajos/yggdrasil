@@ -2196,6 +2196,8 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(VkDebugUtilsMessageSeverityF
     case VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT:
         GFX_ERROR("%s: %s", pCallbackData->pMessageIdName, pCallbackData->pMessage);
         break;
+    default: // The messenger is only created for warnings and errors
+        break;
     }
 
     return VK_FALSE;
